@@ -2,13 +2,14 @@
 
 use std::fmt::{self, Debug, Formatter};
 use std::hash::{Hash, Hasher};
+use std::iter::zip;
 use std::ops::Range;
 use std::sync::Arc;
 
-use comemo::Prehashed;
+use typst_utils::LazyHash;
 
-use super::reparser::reparse;
-use super::{is_newline, parse, FileId, LinkedNode, Span, SyntaxNode};
+use crate::reparser::reparse;
+use crate::{is_newline, parse, FileId, LinkedNode, Span, SyntaxNode, VirtualPath};
 
 /// A source file.
 ///
@@ -23,40 +24,28 @@ pub struct Source(Arc<Repr>);
 #[derive(Clone)]
 struct Repr {
     id: FileId,
-    text: Prehashed<String>,
-    root: Prehashed<SyntaxNode>,
+    text: LazyHash<String>,
+    root: LazyHash<SyntaxNode>,
     lines: Vec<Line>,
 }
 
 impl Source {
     /// Create a new source file.
-    #[tracing::instrument(skip_all)]
     pub fn new(id: FileId, text: String) -> Self {
+        let _scope = typst_timing::TimingScope::new("create source");
         let mut root = parse(&text);
         root.numberize(id, Span::FULL).unwrap();
         Self(Arc::new(Repr {
             id,
             lines: lines(&text),
-            text: Prehashed::new(text),
-            root: Prehashed::new(root),
+            text: LazyHash::new(text),
+            root: LazyHash::new(root),
         }))
     }
 
     /// Create a source file without a real id and path, usually for testing.
     pub fn detached(text: impl Into<String>) -> Self {
-        Self::new(FileId::detached(), text.into())
-    }
-
-    /// Create a source file with the same synthetic span for all nodes.
-    pub fn synthesized(text: String, span: Span) -> Self {
-        let mut root = parse(&text);
-        root.synthesize(span);
-        Self(Arc::new(Repr {
-            id: FileId::detached(),
-            lines: lines(&text),
-            text: Prehashed::new(text),
-            root: Prehashed::new(root),
-        }))
+        Self::new(FileId::new(None, VirtualPath::new("main.typ")), text.into())
     }
 
     /// The root node of the file's untyped syntax tree.
@@ -80,13 +69,40 @@ impl Source {
     }
 
     /// Fully replace the source text.
-    pub fn replace(&mut self, text: String) {
-        let inner = Arc::make_mut(&mut self.0);
-        inner.text = Prehashed::new(text);
-        inner.lines = lines(&inner.text);
-        let mut root = parse(&inner.text);
-        root.numberize(inner.id, Span::FULL).unwrap();
-        inner.root = Prehashed::new(root);
+    ///
+    /// This performs a naive (suffix/prefix-based) diff of the old and new text
+    /// to produce the smallest single edit that transforms old into new and
+    /// then calls [`edit`](Self::edit) with it.
+    ///
+    /// Returns the range in the new source that was ultimately reparsed.
+    pub fn replace(&mut self, new: &str) -> Range<usize> {
+        let _scope = typst_timing::TimingScope::new("replace source");
+        let old = self.text();
+
+        let mut prefix =
+            zip(old.bytes(), new.bytes()).take_while(|(x, y)| x == y).count();
+
+        if prefix == old.len() && prefix == new.len() {
+            return 0..0;
+        }
+
+        while !old.is_char_boundary(prefix) || !new.is_char_boundary(prefix) {
+            prefix -= 1;
+        }
+
+        let mut suffix = zip(old[prefix..].bytes().rev(), new[prefix..].bytes().rev())
+            .take_while(|(x, y)| x == y)
+            .count();
+
+        while !old.is_char_boundary(old.len() - suffix)
+            || !new.is_char_boundary(new.len() - suffix)
+        {
+            suffix += 1;
+        }
+
+        let replace = prefix..old.len() - suffix;
+        let with = &new[prefix..new.len() - suffix];
+        self.edit(replace, with)
     }
 
     /// Edit the source file by replacing the given range.
@@ -103,7 +119,7 @@ impl Source {
         let inner = Arc::make_mut(&mut self.0);
 
         // Update the text itself.
-        inner.text.update(|text| text.replace_range(replace.clone(), with));
+        inner.text.replace_range(replace.clone(), with);
 
         // Remove invalidated line starts.
         inner.lines.truncate(line + 1);
@@ -121,9 +137,7 @@ impl Source {
         ));
 
         // Incrementally reparse the replaced range.
-        inner
-            .root
-            .update(|root| reparse(root, &inner.text, replace, with.len()))
+        reparse(&mut inner.root, &inner.text, replace, with.len())
     }
 
     /// Get the length of the file in UTF-8 encoded bytes.
@@ -151,12 +165,11 @@ impl Source {
 
     /// Get the byte range for the given span in this file.
     ///
-    /// Panics if the span does not point into this source file.
-    #[track_caller]
-    pub fn range(&self, span: Span) -> Range<usize> {
-        self.find(span)
-            .expect("span does not point into this source file")
-            .range()
+    /// Returns `None` if the span does not point into this source file.
+    ///
+    /// Typically, it's easier to use `WorldExt::range` instead.
+    pub fn range(&self, span: Span) -> Option<Range<usize>> {
+        Some(self.find(span)?.range())
     }
 
     /// Return the index of the UTF-16 code unit at the byte index.
@@ -241,7 +254,7 @@ impl Source {
 
 impl Debug for Source {
     fn fmt(&self, f: &mut Formatter) -> fmt::Result {
-        write!(f, "Source({})", self.id().path().display())
+        write!(f, "Source({:?})", self.id().vpath())
     }
 }
 
@@ -396,11 +409,21 @@ mod tests {
         // tested separately.
         #[track_caller]
         fn test(prev: &str, range: Range<usize>, with: &str, after: &str) {
-            let mut source = Source::detached(prev);
-            let result = Source::detached(after);
-            source.edit(range, with);
-            assert_eq!(source.text(), result.text());
-            assert_eq!(source.0.lines, result.0.lines);
+            let reference = Source::detached(after);
+
+            let mut edited = Source::detached(prev);
+            edited.edit(range.clone(), with);
+            assert_eq!(edited.text(), reference.text());
+            assert_eq!(edited.0.lines, reference.0.lines);
+
+            let mut replaced = Source::detached(prev);
+            replaced.replace(&{
+                let mut s = prev.to_string();
+                s.replace_range(range, with);
+                s
+            });
+            assert_eq!(replaced.text(), reference.text());
+            assert_eq!(replaced.0.lines, reference.0.lines);
         }
 
         // Test inserting at the beginning.

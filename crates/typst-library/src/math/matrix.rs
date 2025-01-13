@@ -1,50 +1,68 @@
-use super::*;
+use smallvec::{smallvec, SmallVec};
+use typst_syntax::Spanned;
+use typst_utils::Numeric;
+use unicode_math_class::MathClass;
 
-const ROW_GAP: Em = Em::new(0.5);
-const COL_GAP: Em = Em::new(0.5);
-const VERTICAL_PADDING: Ratio = Ratio::new(0.1);
+use crate::diag::{bail, At, HintedStrResult, StrResult};
+use crate::foundations::{
+    array, cast, dict, elem, Array, Content, Dict, Fold, NoneValue, Resolve, Smart,
+    StyleChain, Symbol, Value,
+};
+use crate::layout::{Abs, Em, HAlignment, Length, Rel};
+use crate::math::Mathy;
+use crate::visualize::Stroke;
+
+const DEFAULT_ROW_GAP: Em = Em::new(0.2);
+const DEFAULT_COL_GAP: Em = Em::new(0.5);
 
 /// A column vector.
 ///
-/// Content in the vector's elements can be aligned with the `&` symbol.
+/// Content in the vector's elements can be aligned with the
+/// [`align`]($math.vec.align) parameter, or the `&` symbol.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// $ vec(a, b, c) dot vec(1, 2, 3)
 ///     = a + 2b + 3c $
 /// ```
-///
-/// Display: Vector
-/// Category: math
-#[element(LayoutMath)]
+#[elem(title = "Vector", Mathy)]
 pub struct VecElem {
     /// The delimiter to use.
+    ///
+    /// Can be a single character specifying the left delimiter, in which case
+    /// the right delimiter is inferred. Otherwise, can be an array containing a
+    /// left and a right delimiter.
     ///
     /// ```example
     /// #set math.vec(delim: "[")
     /// $ vec(1, 2) $
     /// ```
-    #[default(Some(Delimiter::Paren))]
-    pub delim: Option<Delimiter>,
+    #[default(DelimiterPair::PAREN)]
+    pub delim: DelimiterPair,
+
+    /// The horizontal alignment that each element should have.
+    ///
+    /// ```example
+    /// #set math.vec(align: right)
+    /// $ vec(-1, 1, -1) $
+    /// ```
+    #[resolve]
+    #[default(HAlignment::Center)]
+    pub align: HAlignment,
+
+    /// The gap between elements.
+    ///
+    /// ```example
+    /// #set math.vec(gap: 1em)
+    /// $ vec(1, 2) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_ROW_GAP.into())]
+    pub gap: Rel<Length>,
 
     /// The elements of the vector.
     #[variadic]
     pub children: Vec<Content>,
-}
-
-impl LayoutMath for VecElem {
-    #[tracing::instrument(skip(ctx))]
-    fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
-        let delim = self.delim(ctx.styles());
-        let frame = layout_vec_body(ctx, &self.children(), Align::Center)?;
-        layout_delimiters(
-            ctx,
-            frame,
-            delim.map(Delimiter::open),
-            delim.map(Delimiter::close),
-            self.span(),
-        )
-    }
 }
 
 /// A matrix.
@@ -55,9 +73,11 @@ impl LayoutMath for VecElem {
 /// special syntax of math function calls to define custom functions that take
 /// 2D data.
 ///
-/// Content in cells that are in the same row can be aligned with the `&` symbol.
+/// Content in cells can be aligned with the [`align`]($math.mat.align)
+/// parameter, or content in cells that are in the same row can be aligned with
+/// the `&` symbol.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// $ mat(
 ///   1, 2, ..., 10;
@@ -66,19 +86,100 @@ impl LayoutMath for VecElem {
 ///   10, 10, ..., 10;
 /// ) $
 /// ```
-///
-/// Display: Matrix
-/// Category: math
-#[element(LayoutMath)]
+#[elem(title = "Matrix", Mathy)]
 pub struct MatElem {
     /// The delimiter to use.
+    ///
+    /// Can be a single character specifying the left delimiter, in which case
+    /// the right delimiter is inferred. Otherwise, can be an array containing a
+    /// left and a right delimiter.
     ///
     /// ```example
     /// #set math.mat(delim: "[")
     /// $ mat(1, 2; 3, 4) $
     /// ```
-    #[default(Some(Delimiter::Paren))]
-    pub delim: Option<Delimiter>,
+    #[default(DelimiterPair::PAREN)]
+    pub delim: DelimiterPair,
+
+    /// The horizontal alignment that each cell should have.
+    ///
+    /// ```example
+    /// #set math.mat(align: right)
+    /// $ mat(-1, 1, 1; 1, -1, 1; 1, 1, -1) $
+    /// ```
+    #[resolve]
+    #[default(HAlignment::Center)]
+    pub align: HAlignment,
+
+    /// Draws augmentation lines in a matrix.
+    ///
+    /// - `{none}`: No lines are drawn.
+    /// - A single number: A vertical augmentation line is drawn
+    ///   after the specified column number. Negative numbers start from the end.
+    /// - A dictionary: With a dictionary, multiple augmentation lines can be
+    ///   drawn both horizontally and vertically. Additionally, the style of the
+    ///   lines can be set. The dictionary can contain the following keys:
+    ///   - `hline`: The offsets at which horizontal lines should be drawn.
+    ///     For example, an offset of `2` would result in a horizontal line
+    ///     being drawn after the second row of the matrix. Accepts either an
+    ///     integer for a single line, or an array of integers
+    ///     for multiple lines. Like for a single number, negative numbers start from the end.
+    ///   - `vline`: The offsets at which vertical lines should be drawn.
+    ///     For example, an offset of `2` would result in a vertical line being
+    ///     drawn after the second column of the matrix. Accepts either an
+    ///     integer for a single line, or an array of integers
+    ///     for multiple lines. Like for a single number, negative numbers start from the end.
+    ///   - `stroke`: How to [stroke]($stroke) the line. If set to `{auto}`,
+    ///     takes on a thickness of 0.05em and square line caps.
+    ///
+    /// ```example
+    /// $ mat(1, 0, 1; 0, 1, 2; augment: #2) $
+    /// // Equivalent to:
+    /// $ mat(1, 0, 1; 0, 1, 2; augment: #(-1)) $
+    /// ```
+    ///
+    /// ```example
+    /// $ mat(0, 0, 0; 1, 1, 1; augment: #(hline: 1, stroke: 2pt + green)) $
+    /// ```
+    #[resolve]
+    #[fold]
+    pub augment: Option<Augment>,
+
+    /// The gap between rows and columns.
+    ///
+    /// This is a shorthand to set `row-gap` and `column-gap` to the same value.
+    ///
+    /// ```example
+    /// #set math.mat(gap: 1em)
+    /// $ mat(1, 2; 3, 4) $
+    /// ```
+    #[external]
+    pub gap: Rel<Length>,
+
+    /// The gap between rows.
+    ///
+    /// ```example
+    /// #set math.mat(row-gap: 1em)
+    /// $ mat(1, 2; 3, 4) $
+    /// ```
+    #[resolve]
+    #[parse(
+        let gap = args.named("gap")?;
+        args.named("row-gap")?.or(gap)
+    )]
+    #[default(DEFAULT_ROW_GAP.into())]
+    pub row_gap: Rel<Length>,
+
+    /// The gap between columns.
+    ///
+    /// ```example
+    /// #set math.mat(column-gap: 1em)
+    /// $ mat(1, 2; 3, 4) $
+    /// ```
+    #[resolve]
+    #[parse(args.named("column-gap")?.or(gap))]
+    #[default(DEFAULT_COL_GAP.into())]
+    pub column_gap: Rel<Length>,
 
     /// An array of arrays with the rows of the matrix.
     ///
@@ -115,26 +216,11 @@ pub struct MatElem {
     pub rows: Vec<Vec<Content>>,
 }
 
-impl LayoutMath for MatElem {
-    #[tracing::instrument(skip(ctx))]
-    fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
-        let delim = self.delim(ctx.styles());
-        let frame = layout_mat_body(ctx, &self.rows())?;
-        layout_delimiters(
-            ctx,
-            frame,
-            delim.map(Delimiter::open),
-            delim.map(Delimiter::close),
-            self.span(),
-        )
-    }
-}
-
 /// A case distinction.
 ///
 /// Content across different branches can be aligned with the `&` symbol.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// $ f(x, y) := cases(
 ///   1 "if" (x dot y)/2 <= 0,
@@ -143,172 +229,224 @@ impl LayoutMath for MatElem {
 ///   4 "else",
 /// ) $
 /// ```
-///
-/// Display: Cases
-/// Category: math
-#[element(LayoutMath)]
+#[elem(Mathy)]
 pub struct CasesElem {
     /// The delimiter to use.
+    ///
+    /// Can be a single character specifying the left delimiter, in which case
+    /// the right delimiter is inferred. Otherwise, can be an array containing a
+    /// left and a right delimiter.
     ///
     /// ```example
     /// #set math.cases(delim: "[")
     /// $ x = cases(1, 2) $
     /// ```
-    #[default(Delimiter::Brace)]
-    pub delim: Delimiter,
+    #[default(DelimiterPair::BRACE)]
+    pub delim: DelimiterPair,
+
+    /// Whether the direction of cases should be reversed.
+    ///
+    /// ```example
+    /// #set math.cases(reverse: true)
+    /// $ cases(1, 2) = x $
+    /// ```
+    #[default(false)]
+    pub reverse: bool,
+
+    /// The gap between branches.
+    ///
+    /// ```example
+    /// #set math.cases(gap: 1em)
+    /// $ x = cases(1, 2) $
+    /// ```
+    #[resolve]
+    #[default(DEFAULT_ROW_GAP.into())]
+    pub gap: Rel<Length>,
 
     /// The branches of the case distinction.
     #[variadic]
     pub children: Vec<Content>,
 }
 
-impl LayoutMath for CasesElem {
-    #[tracing::instrument(skip(ctx))]
-    fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
-        let delim = self.delim(ctx.styles());
-        let frame = layout_vec_body(ctx, &self.children(), Align::Left)?;
-        layout_delimiters(ctx, frame, Some(delim.open()), None, self.span())
-    }
-}
+/// A delimiter is a single character that is used to delimit a matrix, vector
+/// or cases. The character has to be a Unicode codepoint tagged as a math
+/// "opening", "closing" or "fence".
+///
+/// Typically, the delimiter is stretched to fit the height of whatever it
+/// delimits.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct Delimiter(Option<char>);
 
-/// A vector / matrix delimiter.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash, Cast)]
-pub enum Delimiter {
-    /// Delimit with parentheses.
-    #[string("(")]
-    Paren,
-    /// Delimit with brackets.
-    #[string("[")]
-    Bracket,
-    /// Delimit with curly braces.
-    #[string("{")]
-    Brace,
-    /// Delimit with vertical bars.
-    #[string("|")]
-    Bar,
-    /// Delimit with double vertical bars.
-    #[string("||")]
-    DoubleBar,
+cast! {
+    Delimiter,
+    self => self.0.into_value(),
+    _: NoneValue => Self::none(),
+    v: Symbol => Self::char(v.get())?,
+    v: char => Self::char(v)?,
 }
 
 impl Delimiter {
-    /// The delimiter's opening character.
-    fn open(self) -> char {
-        match self {
-            Self::Paren => '(',
-            Self::Bracket => '[',
-            Self::Brace => '{',
-            Self::Bar => '|',
-            Self::DoubleBar => '‖',
+    pub fn none() -> Self {
+        Self(None)
+    }
+
+    pub fn char(c: char) -> StrResult<Self> {
+        if !matches!(
+            unicode_math_class::class(c),
+            Some(MathClass::Opening | MathClass::Closing | MathClass::Fence),
+        ) {
+            bail!("invalid delimiter: \"{}\"", c)
         }
+        Ok(Self(Some(c)))
+    }
+
+    pub fn get(self) -> Option<char> {
+        self.0
+    }
+
+    pub fn find_matching(self) -> Self {
+        match self.0 {
+            None => Self::none(),
+            Some('[') => Self(Some(']')),
+            Some(']') => Self(Some('[')),
+            Some('{') => Self(Some('}')),
+            Some('}') => Self(Some('{')),
+            Some(c) => match unicode_math_class::class(c) {
+                Some(MathClass::Opening) => Self(char::from_u32(c as u32 + 1)),
+                Some(MathClass::Closing) => Self(char::from_u32(c as u32 - 1)),
+                _ => Self(Some(c)),
+            },
+        }
+    }
+}
+
+/// A pair of delimiters (one closing, one opening) used for matrices, vectors
+/// and cases.
+#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
+pub struct DelimiterPair {
+    open: Delimiter,
+    close: Delimiter,
+}
+
+cast! {
+    DelimiterPair,
+
+    self => array![self.open, self.close].into_value(),
+
+    v: Array => match v.as_slice() {
+        [open, close] => Self {
+            open: open.clone().cast()?,
+            close: close.clone().cast()?,
+        },
+        _ => bail!("expected 2 delimiters, found {}", v.len())
+    },
+    v: Delimiter => Self { open: v, close: v.find_matching() }
+}
+
+impl DelimiterPair {
+    const PAREN: Self = Self {
+        open: Delimiter(Some('(')),
+        close: Delimiter(Some(')')),
+    };
+    const BRACE: Self = Self {
+        open: Delimiter(Some('{')),
+        close: Delimiter(Some('}')),
+    };
+
+    /// The delimiter's opening character.
+    pub fn open(self) -> Option<char> {
+        self.open.get()
     }
 
     /// The delimiter's closing character.
-    fn close(self) -> char {
-        match self {
-            Self::Paren => ')',
-            Self::Bracket => ']',
-            Self::Brace => '}',
-            Self::Bar => '|',
-            Self::DoubleBar => '‖',
+    pub fn close(self) -> Option<char> {
+        self.close.get()
+    }
+}
+
+/// Parameters specifying how augmentation lines
+/// should be drawn on a matrix.
+#[derive(Debug, Default, Clone, PartialEq, Hash)]
+pub struct Augment<T: Numeric = Length> {
+    pub hline: AugmentOffsets,
+    pub vline: AugmentOffsets,
+    pub stroke: Smart<Stroke<T>>,
+}
+
+impl<T: Numeric + Fold> Fold for Augment<T> {
+    fn fold(self, outer: Self) -> Self {
+        Self {
+            stroke: match (self.stroke, outer.stroke) {
+                (Smart::Custom(inner), Smart::Custom(outer)) => {
+                    Smart::Custom(inner.fold(outer))
+                }
+                // Usually, folding an inner `auto` with an `outer` prefers
+                // the explicit `auto`. However, here `auto` means unspecified
+                // and thus we want `outer`.
+                (inner, outer) => inner.or(outer),
+            },
+            ..self
         }
     }
 }
 
-/// Layout the inner contents of a vector.
-fn layout_vec_body(
-    ctx: &mut MathContext,
-    column: &[Content],
-    align: Align,
-) -> SourceResult<Frame> {
-    let gap = ROW_GAP.scaled(ctx);
-    ctx.style(ctx.style.for_denominator());
-    let mut flat = vec![];
-    for child in column {
-        flat.push(ctx.layout_row(child)?);
-    }
-    ctx.unstyle();
-    Ok(stack(ctx, flat, align, gap, 0))
-}
+impl Resolve for Augment {
+    type Output = Augment<Abs>;
 
-/// Layout the inner contents of a matrix.
-fn layout_mat_body(ctx: &mut MathContext, rows: &[Vec<Content>]) -> SourceResult<Frame> {
-    let row_gap = ROW_GAP.scaled(ctx);
-    let col_gap = COL_GAP.scaled(ctx);
-
-    let ncols = rows.first().map_or(0, |row| row.len());
-    let nrows = rows.len();
-    if ncols == 0 || nrows == 0 {
-        return Ok(Frame::new(Size::zero()));
-    }
-
-    let mut heights = vec![(Abs::zero(), Abs::zero()); nrows];
-
-    ctx.style(ctx.style.for_denominator());
-    let mut cols = vec![vec![]; ncols];
-    for (row, (ascent, descent)) in rows.iter().zip(&mut heights) {
-        for (cell, col) in row.iter().zip(&mut cols) {
-            let cell = ctx.layout_row(cell)?;
-            ascent.set_max(cell.ascent());
-            descent.set_max(cell.descent());
-            col.push(cell);
+    fn resolve(self, styles: StyleChain) -> Self::Output {
+        Augment {
+            hline: self.hline,
+            vline: self.vline,
+            stroke: self.stroke.resolve(styles),
         }
     }
-    ctx.unstyle();
-
-    let mut frame = Frame::new(Size::new(
-        Abs::zero(),
-        heights.iter().map(|&(a, b)| a + b).sum::<Abs>() + row_gap * (nrows - 1) as f64,
-    ));
-    let mut x = Abs::zero();
-    for col in cols {
-        let AlignmentResult { points, width: rcol } = alignments(&col);
-        let mut y = Abs::zero();
-        for (cell, &(ascent, descent)) in col.into_iter().zip(&heights) {
-            let cell = cell.into_aligned_frame(ctx, &points, Align::Center);
-            let pos = Point::new(
-                if points.is_empty() { x + (rcol - cell.width()) / 2.0 } else { x },
-                y + ascent - cell.ascent(),
-            );
-            frame.push_frame(pos, cell);
-            y += ascent + descent + row_gap;
-        }
-        x += rcol + col_gap;
-    }
-    frame.size_mut().x = x - col_gap;
-
-    Ok(frame)
 }
 
-/// Layout the outer wrapper around a vector's or matrices' body.
-fn layout_delimiters(
-    ctx: &mut MathContext,
-    mut frame: Frame,
-    left: Option<char>,
-    right: Option<char>,
-    span: Span,
-) -> SourceResult<()> {
-    let axis = scaled!(ctx, axis_height);
-    let short_fall = DELIM_SHORT_FALL.scaled(ctx);
-    let height = frame.height();
-    let target = height + VERTICAL_PADDING.of(height);
-    frame.set_baseline(height / 2.0 + axis);
+cast! {
+    Augment,
+    self => {
+        // if the stroke is auto and there is only one vertical line,
+        if self.stroke.is_auto() && self.hline.0.is_empty() && self.vline.0.len() == 1 {
+            return self.vline.0[0].into_value();
+        }
 
-    if let Some(left) = left {
-        let mut left =
-            GlyphFragment::new(ctx, left, span).stretch_vertical(ctx, target, short_fall);
-        left.center_on_axis(ctx);
-        ctx.push(left);
-    }
+        dict! {
+            "hline" => self.hline,
+            "vline" => self.vline,
+            "stroke" => self.stroke,
+        }.into_value()
+    },
+    v: isize => Augment {
+        hline: AugmentOffsets::default(),
+        vline: AugmentOffsets(smallvec![v]),
+        stroke: Smart::Auto,
+    },
+    mut dict: Dict => {
+        let mut take = |key| dict.take(key).ok().map(AugmentOffsets::from_value).transpose();
+        let hline = take("hline")?.unwrap_or_default();
+        let vline = take("vline")?.unwrap_or_default();
+        let stroke = dict.take("stroke")
+            .ok()
+            .map(Stroke::from_value)
+            .transpose()?
+            .map(Smart::Custom)
+            .unwrap_or(Smart::Auto);
+        Augment { hline, vline, stroke }
+    },
+}
 
-    ctx.push(FrameFragment::new(ctx, frame));
+cast! {
+    Augment<Abs>,
+    self => self.into_value(),
+}
 
-    if let Some(right) = right {
-        let mut right = GlyphFragment::new(ctx, right, span)
-            .stretch_vertical(ctx, target, short_fall);
-        right.center_on_axis(ctx);
-        ctx.push(right);
-    }
+/// The offsets at which augmentation lines should be drawn on a matrix.
+#[derive(Debug, Default, Clone, Eq, PartialEq, Hash)]
+pub struct AugmentOffsets(pub SmallVec<[isize; 1]>);
 
-    Ok(())
+cast! {
+    AugmentOffsets,
+    self => self.0.into_value(),
+    v: isize => Self(smallvec![v]),
+    v: Array => Self(v.into_iter().map(Value::cast).collect::<HintedStrResult<_>>()?),
 }

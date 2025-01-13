@@ -7,11 +7,11 @@ Typst embeds a powerful scripting language. You can automate your documents and
 create more sophisticated styles with code. Below is an overview over the
 scripting concepts.
 
-## Expressions { #expressions }
+## Expressions
 In Typst, markup and code are fused into one. All but the most common elements
 are created with _functions._ To make this as convenient as possible, Typst
 provides compact syntax to embed a code expression into markup: An expression is
-introduced with a hashtag (`#`) and normal markup parsing resumes after the
+introduced with a hash (`#`) and normal markup parsing resumes after the
 expression is finished. If a character would continue the expression but should
 be interpreted as text, the expression can forcibly be ended with a semicolon
 (`;`).
@@ -23,14 +23,13 @@ be interpreted as text, the expression can forcibly be ended with a semicolon
 ```
 
 The example above shows a few of the available expressions, including
-[function calls]($type/function),
-[field accesses]($scripting/#fields), and
+[function calls]($function), [field accesses]($scripting/#fields), and
 [method calls]($scripting/#methods). More kinds of expressions are
 discussed in the remainder of this chapter. A few kinds of expressions are not
-compatible with the hashtag syntax (e.g. binary operator expressions). To embed
+compatible with the hash syntax (e.g. binary operator expressions). To embed
 these into markup, you can use parentheses, as in `[#(1 + 2)]`.
 
-## Blocks { #blocks }
+## Blocks
 To structure your code and embed markup into it, Typst provides two kinds of
 _blocks:_
 
@@ -45,14 +44,14 @@ _blocks:_
 
 - **Content block:** `{[*Hey* there!]}` \
   With content blocks, you can handle markup/content as a programmatic value,
-  store it in variables and pass it to [functions]($type/function). Content
+  store it in variables and pass it to [functions]($function). Content
   blocks are delimited by square brackets and can contain arbitrary markup. A
-  content block results in a value of type [content]($type/content). An
-  arbitrary number of content blocks can be passed as trailing arguments to
-  functions. That is, `{list([A], [B])}` is equivalent to `{list[A][B]}`.
+  content block results in a value of type [content]. An arbitrary number of
+  content blocks can be passed as trailing arguments to functions. That is,
+  `{list([A], [B])}` is equivalent to `{list[A][B]}`.
 
 Content and code blocks can be nested arbitrarily. In the example below,
-`{[hello]}` is joined with the output of  `{a + [ the ] + b}` yielding
+`{[hello ]}` is joined with the output of  `{a + [ the ] + b}` yielding
 `{[hello from the *world*]}`.
 
 ```example
@@ -69,8 +68,9 @@ As already demonstrated above, variables can be defined with `{let}` bindings.
 The variable is assigned the value of the expression that follows the `=` sign.
 The assignment of a value is optional, if no value is assigned, the variable
 will be initialized as `{none}`. The `{let}` keyword can also be used to create
-a [custom named function]($type/function/#definitions). Let bindings can be
-accessed for the rest of the containing block or document.
+a [custom named function]($function/#defining-functions). Variables can be
+accessed for the rest of the containing block (or the rest of the file if there
+is no containing block).
 
 ```example
 #let name = "Typst"
@@ -81,8 +81,8 @@ It explains #name.
 Sum is #add(2, 3).
 ```
 
-Let bindings can also be used to destructure [arrays]($type/array) and
-[dictionaries]($type/dictionary). In this case, the left-hand side of the
+Let bindings can also be used to destructure [arrays]($array) and
+[dictionaries]($dictionary). In this case, the left-hand side of the
 assignment should mirror an array or dictionary. The `..` operator can be used
 once in the pattern to collect the remainder of the array's or dictionary's
 items.
@@ -120,7 +120,7 @@ You can use the underscore to discard elements in a destructuring pattern:
 The y coordinate is #y.
 ```
 
-Destructuring also work in argument lists of functions ...
+Destructuring also works in argument lists of functions ...
 
 ```example
 #let left = (2, 4, 5)
@@ -142,10 +142,10 @@ swap variables among other things.
 }
 ```
 
-## Conditionals { #conditionals }
+## Conditionals
 With a conditional, you can display or compute different things depending on
 whether some condition is fulfilled. Typst supports `{if}`, `{else if}` and
-`{else}` expression. When the condition evaluates to `{true}`, the conditional
+`{else}` expressions. When the condition evaluates to `{true}`, the conditional
 yields the value resulting from the if's body, otherwise yields the value
 resulting from the else's body.
 
@@ -164,7 +164,7 @@ Each branch can have a code or content block as its body.
 - `{if condition [..] else {..}}`
 - `{if condition [..] else if condition {..} else [..]}`
 
-## Loops { #loops }
+## Loops
 With loops, you can repeat content or compute something iteratively. Typst
 supports two types of loops: `{for}` and `{while}` loops. The former iterate
 over a specified collection whereas the latter iterate as long as a condition
@@ -189,20 +189,26 @@ together into one larger array.
 
 For loops can iterate over a variety of collections:
 
-- `{for letter in "abc" {..}}` \
-  Iterates over the characters of the [string]($type/string).
-  (Technically, iterates over the grapheme clusters of the string. Most of the
-  time, a grapheme cluster is just a single character/codepoint. However, some
-  constructs like flag emojis that consist of multiple codepoints are still only
-  one cluster.)
-
 - `{for value in array {..}}` \
-  Iterates over the items in the [array]($type/array). The destructuring syntax
-  described in [Let binding]($scripting/#bindings) can also be used here.
+  Iterates over the items in the [array]. The destructuring syntax described in
+  [Let binding]($scripting/#bindings) can also be used here.
 
 - `{for pair in dict {..}}` \
-  Iterates over the key-value pairs of the [dictionary]($type/dictionary).
-  The pairs can also be destructured by using `{for (key, value) in dict {..}}`.
+  Iterates over the key-value pairs of the [dictionary]. The pairs can also be
+  destructured by using `{for (key, value) in dict {..}}`. It is more efficient
+  than `{for pair in dict.pairs() {..}}` because it doesn't create a temporary
+  array of all key-value pairs.
+
+- `{for letter in "abc" {..}}` \
+  Iterates over the characters of the [string]($str). Technically, it iterates
+  over the grapheme clusters of the string. Most of the time, a grapheme cluster
+  is just a single codepoint. However, a grapheme cluster could contain multiple
+  codepoints, like a flag emoji.
+
+- `{for byte in bytes("😀") {..}}` \
+  Iterates over the [bytes], which can be converted from a [string]($str) or
+  [read] from a file without encoding. Each byte value is an [integer]($int)
+  between `{0}` and `{255}`.
 
 To control the execution of the loop, Typst provides the `{break}` and
 `{continue}` statements. The former performs an early exit from the loop while
@@ -225,76 +231,96 @@ The body of a loop can be a code or content block:
 - `{while condition {..}}`
 - `{while condition [..]}`
 
-## Fields { #fields }
-You can use _dot notation_ to access fields on a value. The value in question
-can be either:
-- a [dictionary]($type/dictionary) that has the specified key,
-- a [symbol]($type/symbol) that has the specified modifier,
-- a [module]($type/module) containing the specified definition,
-- [content]($type/content) consisting of an element that has the specified
-  field. The available fields match the arguments of the
-  [element function]($type/function/#element-functions) that were given when
-  the element was constructed.
+## Fields
+You can use _dot notation_ to access fields on a value. For values of type
+[`content`], you can also use the [`fields`]($content.fields) function to list
+the fields.
+
+The value in question can be either:
+- a [dictionary] that has the specified key,
+- a [symbol] that has the specified modifier,
+- a [module] containing the specified definition,
+- [content] consisting of an element that has the specified field. The
+  available fields match the arguments of the
+  [element function]($function/#element-functions) that were given when the
+  element was constructed.
 
 ```example
+#let it = [= Heading]
+#it.body \
+#it.depth \
+#it.fields()
+
 #let dict = (greet: "Hello")
 #dict.greet \
 #emoji.face
 
-#let it = [= Heading]
-#it.body \
-#it.level
 ```
 
-## Methods { #methods }
-A method is a kind of a [function]($type/function) that is tightly coupled with
-a specific type. It is called on a value of its type using the same dot notation
-that is also used for fields: `{value.method(..)}`. The
-[type documentation]($type) lists the available methods for each of the built-in
-types. You cannot define your own methods.
+## Methods
+A _method call_ is a convenient way to call a function that is scoped to a
+value's [type]. For example, we can call the [`str.len`]($str.len) function in
+the following two equivalent ways:
 
 ```example
-#let array = (1, 2, 3, 4)
-#array.pop() \
-#array.len() \
+#str.len("abc") is the same as
+#"abc".len()
+```
+
+The structure of a method call is `{value.method(..args)}` and its equivalent
+full function call is `{type(value).method(value, ..args)}`. The documentation
+of each type lists its scoped functions. You cannot currently define your own
+methods.
+
+```example
+#let values = (1, 2, 3, 4)
+#values.pop() \
+#values.len() \
 
 #("a, b, c"
     .split(", ")
     .join[ --- ])
+
+#"abc".len() is the same as
+#str.len("abc")
 ```
 
-Methods are the only functions in Typst that can modify the value they are
-called on.
+There are a few special functions that modify the value they are called on (e.g.
+[`array.push`]($array.push)). These functions _must_ be called in method form.
+In some cases, when the method is only called for its side effect, its return
+value should be ignored (and not participate in joining). The canonical way to
+discard a value is with a let binding: `{let _ = array.remove(1)}`.
 
-## Modules { #modules }
+## Modules
 You can split up your Typst projects into multiple files called _modules._ A
 module can refer to the content and definitions of another module in multiple
 ways:
 
 - **Including:** `{include "bar.typ"}` \
-  Evaluates the file at the path `bar.typ` and returns the resulting
-  [content]($type/content).
+  Evaluates the file at the path `bar.typ` and returns the resulting [content].
 
 - **Import:** `{import "bar.typ"}` \
-  Evaluates the file at the path `bar.typ` and inserts the resulting
-  [module]($type/module) into the current scope as `bar` (filename without
-  extension).
+  Evaluates the file at the path `bar.typ` and inserts the resulting [module]
+  into the current scope as `bar` (filename without extension). You can use the
+  `as` keyword to rename the imported module: `{import "bar.typ" as baz}`. You
+  can import nested items using dot notation: `{import "bar.typ": baz.a}`.
 
 - **Import items:** `{import "bar.typ": a, b}` \
   Evaluates the file at the path `bar.typ`, extracts the values of the variables
   `a` and `b` (that need to be defined in `bar.typ`, e.g. through `{let}`
-  bindings) and defines them in the current file.Replacing `a, b` with `*` loads
-  all variables defined in a module.
+  bindings) and defines them in the current file. Replacing `a, b` with `*`
+  loads all variables defined in a module. You can use the `as` keyword to
+  rename the individual items: `{import "bar.typ": a as one, b as two}`
 
-Instead of a path, you can also use a [module value]($type/module), as shown in
-the following example:
+Instead of a path, you can also use a [module value]($module), as shown in the
+following example:
 
 ```example
 #import emoji: face
 #face.grin
 ```
 
-## Packages { #packages }
+## Packages
 To reuse building blocks across projects, you can also create and import Typst
 _packages._ A package import is specified as a triple of a namespace, a name,
 and a version.
@@ -306,16 +332,18 @@ and a version.
 ```
 
 The `preview` namespace contains packages shared by the community. You can find
-a searchable list of available community packages in the [packages]($packages)
-section.
+all available community packages on [Typst Universe]($universe).
 
 If you are using Typst locally, you can also create your own system-local
 packages. For more details on this, see the
 [package repository](https://github.com/typst/packages).
 
-## Operators { #operators }
+## Operators
 The following table lists all available unary and binary operators with effect,
-arity (unary, binary) and precedence level (higher binds stronger).
+arity (unary, binary) and precedence level (higher binds stronger). Some
+operations, such as [modulus]($calc.rem-euclid), do not have a special syntax
+and can be achieved using functions from the
+[`calc`]($category/foundations/calc) module.
 
 | Operator   | Effect                          | Arity  | Precedence |
 |:----------:|---------------------------------|:------:|:----------:|

@@ -1,8 +1,15 @@
-use typst::eval::AutoValue;
-
-use super::VElem;
-use crate::layout::Spacing;
-use crate::prelude::*;
+use crate::diag::{bail, SourceResult};
+use crate::engine::Engine;
+use crate::foundations::{
+    cast, elem, Args, AutoValue, Construct, Content, NativeElement, Packed, Smart,
+    StyleChain, Value,
+};
+use crate::introspection::Locator;
+use crate::layout::{
+    Abs, Corners, Em, Fr, Fragment, Frame, Length, Region, Regions, Rel, Sides, Size,
+    Spacing,
+};
+use crate::visualize::{Paint, Stroke};
 
 /// An inline-level container that sizes content.
 ///
@@ -11,7 +18,7 @@ use crate::prelude::*;
 /// elements into a paragraph. Boxes take the size of their contents by default
 /// but can also be sized explicitly.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// Refer to the docs
 /// #box(
@@ -20,15 +27,12 @@ use crate::prelude::*;
 /// )
 /// for more information.
 /// ```
-///
-/// Display: Box
-/// Category: layout
-#[element(Layout)]
+#[elem]
 pub struct BoxElem {
     /// The width of the box.
     ///
-    /// Boxes can have [fractional]($type/fraction) widths, as the example
-    /// below demonstrates.
+    /// Boxes can have [fractional]($fraction) widths, as the example below
+    /// demonstrates.
     ///
     /// _Note:_ Currently, only boxes and only their widths might be fractionally
     /// sized within paragraphs. Support for fractionally sized images, shapes,
@@ -51,23 +55,29 @@ pub struct BoxElem {
     pub baseline: Rel<Length>,
 
     /// The box's background color. See the
-    /// [rectangle's documentation]($func/rect.fill) for more details.
+    /// [rectangle's documentation]($rect.fill) for more details.
     pub fill: Option<Paint>,
 
     /// The box's border color. See the
-    /// [rectangle's documentation]($func/rect.stroke) for more details.
+    /// [rectangle's documentation]($rect.stroke) for more details.
     #[resolve]
     #[fold]
-    pub stroke: Sides<Option<Option<PartialStroke>>>,
+    pub stroke: Sides<Option<Option<Stroke>>>,
 
-    /// How much to round the box's corners. See the [rectangle's
-    /// documentation]($func/rect.radius) for more details.
+    /// How much to round the box's corners. See the
+    /// [rectangle's documentation]($rect.radius) for more details.
     #[resolve]
     #[fold]
     pub radius: Corners<Option<Rel<Length>>>,
 
-    /// How much to pad the box's content. See the [rectangle's
-    /// documentation]($func/rect.inset) for more details.
+    /// How much to pad the box's content.
+    ///
+    /// _Note:_ When the box contains text, its exact size depends on the
+    /// current [text edges]($text.top-edge).
+    ///
+    /// ```example
+    /// #rect(inset: 0pt)[Tight]
+    /// ```
     #[resolve]
     #[fold]
     pub inset: Sides<Option<Rel<Length>>>,
@@ -76,7 +86,7 @@ pub struct BoxElem {
     ///
     /// This is useful to prevent padding from affecting line layout. For a
     /// generalized version of the example below, see the documentation for the
-    /// [raw text's block parameter]($func/raw.block).
+    /// [raw text's block parameter]($raw.block).
     ///
     /// ```example
     /// An inline
@@ -92,79 +102,81 @@ pub struct BoxElem {
     pub outset: Sides<Option<Rel<Length>>>,
 
     /// Whether to clip the content inside the box.
+    ///
+    /// Clipping is useful when the box's content is larger than the box itself,
+    /// as any content that exceeds the box's bounds will be hidden.
+    ///
+    /// ```example
+    /// #box(
+    ///   width: 50pt,
+    ///   height: 50pt,
+    ///   clip: true,
+    ///   image("tiger.jpg", width: 100pt, height: 100pt)
+    /// )
+    /// ```
     #[default(false)]
     pub clip: bool,
 
     /// The contents of the box.
     #[positional]
+    #[borrowed]
     pub body: Option<Content>,
 }
 
-impl Layout for BoxElem {
-    #[tracing::instrument(name = "BoxElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        let width = match self.width(styles) {
-            Sizing::Auto => Smart::Auto,
-            Sizing::Rel(rel) => Smart::Custom(rel),
-            Sizing::Fr(_) => Smart::Custom(Ratio::one().into()),
-        };
+/// An inline-level container that can produce arbitrary items that can break
+/// across lines.
+#[elem(Construct)]
+pub struct InlineElem {
+    /// A callback that is invoked with the regions to produce arbitrary
+    /// inline items.
+    #[required]
+    #[internal]
+    body: callbacks::InlineCallback,
+}
 
-        // Resolve the sizing to a concrete size.
-        let sizing = Axes::new(width, self.height(styles));
-        let expand = sizing.as_ref().map(Smart::is_custom);
-        let size = sizing
-            .resolve(styles)
-            .zip(regions.base())
-            .map(|(s, b)| s.map(|v| v.relative_to(b)))
-            .unwrap_or(regions.base());
-
-        // Apply inset.
-        let mut body = self.body(styles).unwrap_or_default();
-        let inset = self.inset(styles);
-        if inset.iter().any(|v| !v.is_zero()) {
-            body = body.padded(inset.map(|side| side.map(Length::from)));
-        }
-
-        // Select the appropriate base and expansion for the child depending
-        // on whether it is automatically or relatively sized.
-        let pod = Regions::one(size, expand);
-        let mut frame = body.layout(vt, styles, pod)?.into_frame();
-
-        // Enforce correct size.
-        *frame.size_mut() = expand.select(size, frame.size());
-
-        // Apply baseline shift.
-        let shift = self.baseline(styles).relative_to(frame.height());
-        if !shift.is_zero() {
-            frame.set_baseline(frame.baseline() - shift);
-        }
-
-        // Clip the contents
-        if self.clip(styles) {
-            frame.clip();
-        }
-
-        // Prepare fill and stroke.
-        let fill = self.fill(styles);
-        let stroke = self.stroke(styles).map(|s| s.map(PartialStroke::unwrap_or_default));
-
-        // Add fill and/or stroke.
-        if fill.is_some() || stroke.iter().any(Option::is_some) {
-            let outset = self.outset(styles);
-            let radius = self.radius(styles);
-            frame.fill_and_stroke(fill, stroke, outset, radius, self.span());
-        }
-
-        // Apply metadata.
-        frame.meta(styles, false);
-
-        Ok(Fragment::frame(frame))
+impl Construct for InlineElem {
+    fn construct(_: &mut Engine, args: &mut Args) -> SourceResult<Content> {
+        bail!(args.span, "cannot be constructed manually");
     }
+}
+
+impl InlineElem {
+    /// Create an inline-level item with a custom layouter.
+    #[allow(clippy::type_complexity)]
+    pub fn layouter<T: NativeElement>(
+        captured: Packed<T>,
+        callback: fn(
+            content: &Packed<T>,
+            engine: &mut Engine,
+            locator: Locator,
+            styles: StyleChain,
+            region: Size,
+        ) -> SourceResult<Vec<InlineItem>>,
+    ) -> Self {
+        Self::new(callbacks::InlineCallback::new(captured, callback))
+    }
+}
+
+impl Packed<InlineElem> {
+    /// Layout the element.
+    pub fn layout(
+        &self,
+        engine: &mut Engine,
+        locator: Locator,
+        styles: StyleChain,
+        region: Size,
+    ) -> SourceResult<Vec<InlineItem>> {
+        self.body.call(engine, locator, styles, region)
+    }
+}
+
+/// Layouted items suitable for placing in a paragraph.
+#[derive(Debug, Clone)]
+pub enum InlineItem {
+    /// Absolute spacing between other items, and whether it is weak.
+    Space(Abs, bool),
+    /// Layouted inline-level content.
+    Frame(Frame),
 }
 
 /// A block-level container.
@@ -172,7 +184,7 @@ impl Layout for BoxElem {
 /// Such a container can be used to separate content, size it, and give it a
 /// background or border.
 ///
-/// ## Examples { #examples }
+/// # Examples
 /// With a block, you can give a background to content while still allowing it
 /// to break across multiple pages.
 /// ```example
@@ -196,10 +208,7 @@ impl Layout for BoxElem {
 /// = Blocky
 /// More text.
 /// ```
-///
-/// Display: Block
-/// Category: layout
-#[element(Layout)]
+#[elem]
 pub struct BlockElem {
     /// The block's width.
     ///
@@ -215,7 +224,7 @@ pub struct BlockElem {
     pub width: Smart<Rel<Length>>,
 
     /// The block's height. When the height is larger than the remaining space
-    /// on a page and [`breakable`]($func/block.breakable) is `{true}`, the
+    /// on a page and [`breakable`]($block.breakable) is `{true}`, the
     /// block will continue on the next page with the remaining height.
     ///
     /// ```example
@@ -227,7 +236,7 @@ pub struct BlockElem {
     ///   fill: aqua,
     /// )
     /// ```
-    pub height: Smart<Rel<Length>>,
+    pub height: Sizing,
 
     /// Whether the block can be broken and continue on the next page.
     ///
@@ -244,35 +253,47 @@ pub struct BlockElem {
     pub breakable: bool,
 
     /// The block's background color. See the
-    /// [rectangle's documentation]($func/rect.fill) for more details.
+    /// [rectangle's documentation]($rect.fill) for more details.
     pub fill: Option<Paint>,
 
     /// The block's border color. See the
-    /// [rectangle's documentation]($func/rect.stroke) for more details.
+    /// [rectangle's documentation]($rect.stroke) for more details.
     #[resolve]
     #[fold]
-    pub stroke: Sides<Option<Option<PartialStroke>>>,
+    pub stroke: Sides<Option<Option<Stroke>>>,
 
-    /// How much to round the block's corners. See the [rectangle's
-    /// documentation]($func/rect.radius) for more details.
+    /// How much to round the block's corners. See the
+    /// [rectangle's documentation]($rect.radius) for more details.
     #[resolve]
     #[fold]
     pub radius: Corners<Option<Rel<Length>>>,
 
-    /// How much to pad the block's content. See the [rectangle's
-    /// documentation]($func/rect.inset) for more details.
+    /// How much to pad the block's content. See the
+    /// [box's documentation]($box.inset) for more details.
     #[resolve]
     #[fold]
     pub inset: Sides<Option<Rel<Length>>>,
 
     /// How much to expand the block's size without affecting the layout. See
-    /// the [rectangle's documentation]($func/rect.outset) for more details.
+    /// the [box's documentation]($box.outset) for more details.
     #[resolve]
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
 
-    /// The spacing around this block. This is shorthand to set `above` and
-    /// `below` to the same value.
+    /// The spacing around the block. When `{auto}`, inherits the paragraph
+    /// [`spacing`]($par.spacing).
+    ///
+    /// For two adjacent blocks, the larger of the first block's `above` and the
+    /// second block's `below` spacing wins. Moreover, block spacing takes
+    /// precedence over paragraph [`spacing`]($par.spacing).
+    ///
+    /// Note that this is only a shorthand to set `above` and `below` to the
+    /// same value. Since the values for `above` and `below` might differ, a
+    /// [context] block only provides access to `{block.above}` and
+    /// `{block.below}`, not to `{block.spacing}` directly.
+    ///
+    /// This property can be used in combination with a show rule to adjust the
+    /// spacing around arbitrary block-level elements.
     ///
     /// ```example
     /// #set align(center)
@@ -286,183 +307,142 @@ pub struct BlockElem {
     #[default(Em::new(1.2).into())]
     pub spacing: Spacing,
 
-    /// The spacing between this block and its predecessor. Takes precedence
-    /// over `spacing`. Can be used in combination with a show rule to adjust
-    /// the spacing around arbitrary block-level elements.
-    #[external]
-    #[default(Em::new(1.2).into())]
-    pub above: Spacing,
-    #[internal]
+    /// The spacing between this block and its predecessor.
     #[parse(
         let spacing = args.named("spacing")?;
-        args.named("above")?
-            .map(VElem::block_around)
-            .or_else(|| spacing.map(VElem::block_spacing))
+        args.named("above")?.or(spacing)
     )]
-    #[default(VElem::block_spacing(Em::new(1.2).into()))]
-    pub above: VElem,
+    pub above: Smart<Spacing>,
 
-    /// The spacing between this block and its successor. Takes precedence
-    /// over `spacing`.
-    #[external]
-    #[default(Em::new(1.2).into())]
-    pub below: Spacing,
-    #[internal]
-    #[parse(
-        args.named("below")?
-            .map(VElem::block_around)
-            .or_else(|| spacing.map(VElem::block_spacing))
-    )]
-    #[default(VElem::block_spacing(Em::new(1.2).into()))]
-    pub below: VElem,
+    /// The spacing between this block and its successor.
+    #[parse(args.named("below")?.or(spacing))]
+    pub below: Smart<Spacing>,
 
     /// Whether to clip the content inside the block.
+    ///
+    /// Clipping is useful when the block's content is larger than the block itself,
+    /// as any content that exceeds the block's bounds will be hidden.
+    ///
+    /// ```example
+    /// #block(
+    ///   width: 50pt,
+    ///   height: 50pt,
+    ///   clip: true,
+    ///   image("tiger.jpg", width: 100pt, height: 100pt)
+    /// )
+    /// ```
     #[default(false)]
     pub clip: bool,
 
-    /// The contents of the block.
-    #[positional]
-    pub body: Option<Content>,
-
-    /// Whether this block must stick to the following one.
+    /// Whether this block must stick to the following one, with no break in
+    /// between.
     ///
-    /// Use this to prevent page breaks between e.g. a heading and its body.
-    #[internal]
+    /// This is, by default, set on heading blocks to prevent orphaned headings
+    /// at the bottom of the page.
+    ///
+    /// ```example
+    /// >>> #set page(height: 140pt)
+    /// // Disable stickiness of headings.
+    /// #show heading: set block(sticky: false)
+    /// #lorem(20)
+    ///
+    /// = Chapter
+    /// #lorem(10)
+    /// ```
     #[default(false)]
     pub sticky: bool,
+
+    /// The contents of the block.
+    #[positional]
+    #[borrowed]
+    pub body: Option<BlockBody>,
 }
 
-impl Layout for BlockElem {
-    #[tracing::instrument(name = "BlockElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        // Apply inset.
-        let mut body = self.body(styles).unwrap_or_default();
-        let inset = self.inset(styles);
-        if inset.iter().any(|v| !v.is_zero()) {
-            body = body.clone().padded(inset.map(|side| side.map(Length::from)));
-        }
+impl BlockElem {
+    /// Create a block with a custom single-region layouter.
+    ///
+    /// Such a block must have `breakable: false` (which is set by this
+    /// constructor).
+    pub fn single_layouter<T: NativeElement>(
+        captured: Packed<T>,
+        f: fn(
+            content: &Packed<T>,
+            engine: &mut Engine,
+            locator: Locator,
+            styles: StyleChain,
+            region: Region,
+        ) -> SourceResult<Frame>,
+    ) -> Self {
+        Self::new()
+            .with_breakable(false)
+            .with_body(Some(BlockBody::SingleLayouter(
+                callbacks::BlockSingleCallback::new(captured, f),
+            )))
+    }
 
-        // Resolve the sizing to a concrete size.
-        let sizing = Axes::new(self.width(styles), self.height(styles));
-        let mut expand = sizing.as_ref().map(Smart::is_custom);
-        let mut size = sizing
-            .resolve(styles)
-            .zip(regions.base())
-            .map(|(s, b)| s.map(|v| v.relative_to(b)))
-            .unwrap_or(regions.base());
-
-        // Layout the child.
-        let mut frames = if self.breakable(styles) {
-            // Measure to ensure frames for all regions have the same width.
-            if sizing.x == Smart::Auto {
-                let pod = Regions::one(size, Axes::splat(false));
-                let frame = body.measure(vt, styles, pod)?.into_frame();
-                size.x = frame.width();
-                expand.x = true;
-            }
-
-            let mut pod = regions;
-            pod.size.x = size.x;
-            pod.expand = expand;
-
-            if expand.y {
-                pod.full = size.y;
-            }
-
-            // Generate backlog for fixed height.
-            let mut heights = vec![];
-            if sizing.y.is_custom() {
-                let mut remaining = size.y;
-                for region in regions.iter() {
-                    let limited = region.y.min(remaining);
-                    heights.push(limited);
-                    remaining -= limited;
-                    if Abs::zero().fits(remaining) {
-                        break;
-                    }
-                }
-
-                if let Some(last) = heights.last_mut() {
-                    *last += remaining;
-                }
-
-                pod.size.y = heights[0];
-                pod.backlog = &heights[1..];
-                pod.last = None;
-            }
-
-            let mut frames = body.layout(vt, styles, pod)?.into_frames();
-            for (frame, &height) in frames.iter_mut().zip(&heights) {
-                *frame.size_mut() =
-                    expand.select(Size::new(size.x, height), frame.size());
-            }
-            frames
-        } else {
-            let pod = Regions::one(size, expand);
-            let mut frames = body.layout(vt, styles, pod)?.into_frames();
-            *frames[0].size_mut() = expand.select(size, frames[0].size());
-            frames
-        };
-
-        // Clip the contents
-        if self.clip(styles) {
-            for frame in frames.iter_mut() {
-                frame.clip();
-            }
-        }
-
-        // Prepare fill and stroke.
-        let fill = self.fill(styles);
-        let stroke = self.stroke(styles).map(|s| s.map(PartialStroke::unwrap_or_default));
-
-        // Add fill and/or stroke.
-        if fill.is_some() || stroke.iter().any(Option::is_some) {
-            let mut skip = false;
-            if let [first, rest @ ..] = frames.as_slice() {
-                skip = first.is_empty() && rest.iter().any(|frame| !frame.is_empty());
-            }
-
-            let outset = self.outset(styles);
-            let radius = self.radius(styles);
-            for frame in frames.iter_mut().skip(skip as usize) {
-                frame.fill_and_stroke(
-                    fill.clone(),
-                    stroke.clone(),
-                    outset,
-                    radius,
-                    self.span(),
-                );
-            }
-        }
-
-        // Apply metadata.
-        for frame in &mut frames {
-            frame.meta(styles, false);
-        }
-
-        Ok(Fragment::frames(frames))
+    /// Create a block with a custom multi-region layouter.
+    pub fn multi_layouter<T: NativeElement>(
+        captured: Packed<T>,
+        f: fn(
+            content: &Packed<T>,
+            engine: &mut Engine,
+            locator: Locator,
+            styles: StyleChain,
+            regions: Regions,
+        ) -> SourceResult<Fragment>,
+    ) -> Self {
+        Self::new().with_body(Some(BlockBody::MultiLayouter(
+            callbacks::BlockMultiCallback::new(captured, f),
+        )))
     }
 }
 
-/// Defines how to size a grid cell along an axis.
+/// The contents of a block.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub enum BlockBody {
+    /// The block contains normal content.
+    Content(Content),
+    /// The block contains a layout callback that needs access to just one
+    /// base region.
+    SingleLayouter(callbacks::BlockSingleCallback),
+    /// The block contains a layout callback that needs access to the exact
+    /// regions.
+    MultiLayouter(callbacks::BlockMultiCallback),
+}
+
+impl Default for BlockBody {
+    fn default() -> Self {
+        Self::Content(Content::default())
+    }
+}
+
+cast! {
+    BlockBody,
+    self => match self {
+        Self::Content(content) => content.into_value(),
+        _ => Value::Auto,
+    },
+    v: Content => Self::Content(v),
+}
+
+/// Defines how to size something along an axis.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum Sizing {
-    /// A track that fits its cell's contents.
+    /// A track that fits its item's contents.
     Auto,
-    /// A track size specified in absolute terms and relative to the parent's
-    /// size.
-    Rel(Rel<Length>),
-    /// A track size specified as a fraction of the remaining free space in the
+    /// A size specified in absolute terms and relative to the parent's size.
+    Rel(Rel),
+    /// A size specified as a fraction of the remaining free space in the
     /// parent.
     Fr(Fr),
 }
 
 impl Sizing {
+    /// Whether this is an automatic sizing.
+    pub fn is_auto(self) -> bool {
+        matches!(self, Self::Auto)
+    }
+
     /// Whether this is fractional sizing.
     pub fn is_fractional(self) -> bool {
         matches!(self, Self::Fr(_))
@@ -472,6 +452,15 @@ impl Sizing {
 impl Default for Sizing {
     fn default() -> Self {
         Self::Auto
+    }
+}
+
+impl From<Smart<Rel>> for Sizing {
+    fn from(smart: Smart<Rel>) -> Self {
+        match smart {
+            Smart::Auto => Self::Auto,
+            Smart::Custom(rel) => Self::Rel(rel),
+        }
     }
 }
 
@@ -494,4 +483,81 @@ cast! {
     _: AutoValue => Self::Auto,
     v: Rel<Length> => Self::Rel(v),
     v: Fr => Self::Fr(v),
+}
+
+/// Manual closure implementations for layout callbacks.
+///
+/// Normal closures are not `Hash`, so we can't use them.
+mod callbacks {
+    use super::*;
+
+    macro_rules! callback {
+        ($name:ident = ($($param:ident: $param_ty:ty),* $(,)?) -> $ret:ty) => {
+            #[derive(Debug, Clone, PartialEq, Hash)]
+            pub struct $name {
+                captured: Content,
+                f: fn(&Content, $($param_ty),*) -> $ret,
+            }
+
+            impl $name {
+                pub fn new<T: NativeElement>(
+                    captured: Packed<T>,
+                    f: fn(&Packed<T>, $($param_ty),*) -> $ret,
+                ) -> Self {
+                    Self {
+                        // Type-erased the content.
+                        captured: captured.pack(),
+                        // Safety: The only difference between the two function
+                        // pointer types is the type of the first parameter,
+                        // which changes from `&Packed<T>` to `&Content`. This
+                        // is safe because:
+                        // - `Packed<T>` is a transparent wrapper around
+                        //   `Content`, so for any `T` it has the same memory
+                        //   representation as `Content`.
+                        // - While `Packed<T>` imposes the additional constraint
+                        //   that the content is of type `T`, this constraint is
+                        //   upheld: It is initially the case because we store a
+                        //   `Packed<T>` above. It keeps being the case over the
+                        //   lifetime of the closure because `capture` is a
+                        //   private field and `Content`'s `Clone` impl is
+                        //   guaranteed to retain the type (if it didn't,
+                        //   literally everything would break).
+                        #[allow(clippy::missing_transmute_annotations)]
+                        f: unsafe { std::mem::transmute(f) },
+                    }
+                }
+
+                pub fn call(&self, $($param: $param_ty),*) -> $ret {
+                    (self.f)(&self.captured, $($param),*)
+                }
+            }
+        };
+    }
+
+    callback! {
+        InlineCallback = (
+            engine: &mut Engine,
+            locator: Locator,
+            styles: StyleChain,
+            region: Size,
+        ) -> SourceResult<Vec<InlineItem>>
+    }
+
+    callback! {
+        BlockSingleCallback = (
+            engine: &mut Engine,
+            locator: Locator,
+            styles: StyleChain,
+            region: Region,
+        ) -> SourceResult<Frame>
+    }
+
+    callback! {
+        BlockMultiCallback = (
+            engine: &mut Engine,
+            locator: Locator,
+            styles: StyleChain,
+            regions: Regions,
+        ) -> SourceResult<Fragment>
+    }
 }

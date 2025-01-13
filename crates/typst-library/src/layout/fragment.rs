@@ -1,4 +1,6 @@
-use crate::prelude::*;
+use std::fmt::{self, Debug, Formatter};
+
+use crate::layout::Frame;
 
 /// A partial layout result.
 #[derive(Clone)]
@@ -37,6 +39,11 @@ impl Fragment {
     /// Extract the frames.
     pub fn into_frames(self) -> Vec<Frame> {
         self.0
+    }
+
+    /// Extract a slice with the contained frames.
+    pub fn as_slice(&self) -> &[Frame] {
+        &self.0
     }
 
     /// Iterate over the contained frames.

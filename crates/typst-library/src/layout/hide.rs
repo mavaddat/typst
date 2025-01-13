@@ -1,4 +1,6 @@
-use crate::prelude::*;
+use crate::diag::SourceResult;
+use crate::engine::Engine;
+use crate::foundations::{elem, Content, Packed, Show, StyleChain};
 
 /// Hides content without affecting layout.
 ///
@@ -7,24 +9,26 @@ use crate::prelude::*;
 /// content. It may also be useful to redact content because its arguments are
 /// not included in the output.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// Hello Jane \
 /// #hide[Hello] Joe
 /// ```
-///
-/// Display: Hide
-/// Category: layout
-#[element(Show)]
+#[elem(Show)]
 pub struct HideElem {
     /// The content to hide.
     #[required]
     pub body: Content,
+
+    /// This style is set on the content contained in the `hide` element.
+    #[internal]
+    #[ghost]
+    pub hidden: bool,
 }
 
-impl Show for HideElem {
-    #[tracing::instrument(name = "HideElem::show", skip(self))]
-    fn show(&self, _: &mut Vt, _: StyleChain) -> SourceResult<Content> {
-        Ok(self.body().styled(MetaElem::set_data(vec![Meta::Hide])))
+impl Show for Packed<HideElem> {
+    #[typst_macros::time(name = "hide", span = self.span())]
+    fn show(&self, _: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+        Ok(self.body.clone().styled(HideElem::set_hidden(true)))
     }
 }

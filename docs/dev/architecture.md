@@ -3,23 +3,32 @@ Wondering how to contribute or just curious how Typst works? This document
 covers the general structure and architecture of Typst's compiler, so you get an
 understanding of what's where and how everything fits together.
 
+
 ## Directories
 Let's start with a broad overview of the directories in this repository:
 
-- `crates/typst`: The main compiler crate which is home to the parser,
-  interpreter, exporters, IDE tooling, and more.
-- `crates/typst-library`: Typst's standard library with all global definitions
-  available in Typst. Also contains the layout and text handling pipeline.
+- `crates/typst`: The main compiler crate which defines the complete language
+  and library.
 - `crates/typst-cli`: Typst's command line interface. This is a relatively small
-  layer on top of `typst` and `typst-library`.
-- `crates/typst-docs`: Generates the content of the official
-  [documentation][docs] from the content of the `docs` folder and the inline
+  layer on top of the compiler and the exporters.
+- `crates/typst-eval`: The interpreter for the Typst language.
+- `crates/typst-ide`: Exposes IDE functionality.
+- `crates/typst-kit`: Contains various default implementation of
+  functionality used in `typst-cli`.
+- `crates/typst-layout`: Typst's layout engine.
+- `crates/typst-library`: Typst's standard library.
+- `crates/typst-macros`: Procedural macros for the compiler.
+- `crates/typst-pdf`: The PDF exporter.
+- `crates/typst-realize`: Typst's realization subsystem.
+- `crates/typst-render`: A renderer for Typst frames.
+- `crates/typst-svg`: The SVG exporter.
+- `crates/typst-syntax`: Home to the parser and syntax tree definition.
+- `crates/typst-timing`: Performance timing for Typst.
+- `crates/typst-utils`: Utilities for Typst.
+- `docs`: Generates the content of the official
+  [documentation][docs] from markdown files and the inline
   Rust documentation. Only generates the content and structure, not the concrete
   HTML (that part is currently closed source).
-- `crates/typst-macros`: Procedural macros for the compiler and library.
-- `docs`: Source files for longer-form parts of the documentation. Individual
-  elements and functions are documented inline with the Rust source code.
-- `assets`: Fonts and files used for tests and the documentation.
 - `tests`: Integration tests for Typst compilation.
 - `tools`: Tooling for development.
 
@@ -29,8 +38,8 @@ The source-to-PDF compilation process of a Typst file proceeds in four phases.
 
 1. **Parsing:** Turns a source string into a syntax tree.
 2. **Evaluation:** Turns a syntax tree and its dependencies into content.
-4. **Layout:** Layouts content into frames.
-5. **Export:** Turns frames into an output format like PDF or a raster graphic.
+3. **Layout:** Layouts content into frames.
+4. **Export:** Turns frames into an output format like PDF or a raster graphic.
 
 The Typst compiler is _incremental:_ Recompiling a document that was compiled
 previously is much faster than compiling from scratch. Most of the hard work is
@@ -137,10 +146,11 @@ reuse as much as possible.
 
 
 ## Export
-Exporters live in `crates/typst/src/export`. They turn layouted frames into an
-output file format.
+Exporters live in separate crates. They turn layouted frames into an output file
+format.
 
 - The PDF exporter takes layouted frames and turns them into a PDF file.
+- The SVG exporter takes a frame and turns it into an SVG.
 - The built-in renderer takes a frame and turns it into a pixel buffer.
 - HTML export does not exist yet, but will in the future. However, this requires
   some complex compiler work because the export will start with `Content`
@@ -148,13 +158,13 @@ output file format.
 
 
 ## IDE
-The `crates/typst/src/ide` module implements IDE functionality for Typst. It
+The `crates/typst-ide` crate implements IDE functionality for Typst. It
 builds heavily on the other modules (most importantly, `syntax` and `eval`).
 
 **Syntactic:**
 Basic IDE functionality is based on a file's syntax. However, the standard
 syntax node is a bit too limited for writing IDE tooling. It doesn't provide
-access to its parents or neighbours. This is a fine for an evaluation-like
+access to its parents or neighbours. This is fine for an evaluation-like
 recursive traversal, but impractical for IDE use cases. For this reason, there
 is an additional abstraction on top of a syntax node called a `LinkedNode`,
 which is used pervasively across the `ide` module.
@@ -180,16 +190,10 @@ in the active file needs to re-run. This is all handled automatically by
 
 
 ## Tests
-Typst has an extensive suite of integration tests. A test file consists of
-multiple tests that are separated by `---`. For each test file, we store a
-reference image defining what the compiler _should_ output. To manage the
-reference images, you can use the VS code extension in `tools/test-helper`.
-
-The integration tests cover parsing, evaluation, realization, layout and
-rendering. PDF output is sadly untested, but most bugs are in earlier phases of
-the compiler; the PDF output itself is relatively straight-forward. IDE
-functionality is also mostly untested. PDF and IDE testing should be added in
-the future.
+Typst has an extensive suite of integration tests. These tests cover parsing,
+evaluation, realization, layout, and rendering. PDF output is sadly untested so
+far, but most bugs are in earlier phases of the compiler. For more details about
+testing, see the [tests directory](/tests) and its README.
 
 [docs]: https://typst.app/docs/
 [`comemo`]: https://github.com/typst/comemo/

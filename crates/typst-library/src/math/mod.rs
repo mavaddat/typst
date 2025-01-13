@@ -1,494 +1,257 @@
 //! Mathematical formulas.
 
-#[macro_use]
-mod ctx;
-mod accent;
-mod align;
+pub mod accent;
 mod attach;
 mod cancel;
-mod class;
-mod delimited;
+mod equation;
 mod frac;
-mod fragment;
+mod lr;
 mod matrix;
 mod op;
 mod root;
-mod row;
-mod spacing;
-mod stretch;
 mod style;
 mod underover;
 
-pub use self::accent::*;
-pub use self::align::*;
+pub use self::accent::{Accent, AccentElem};
 pub use self::attach::*;
 pub use self::cancel::*;
-pub use self::class::*;
-pub use self::delimited::*;
+pub use self::equation::*;
 pub use self::frac::*;
+pub use self::lr::*;
 pub use self::matrix::*;
 pub use self::op::*;
 pub use self::root::*;
 pub use self::style::*;
 pub use self::underover::*;
 
-use ttf_parser::{GlyphId, Rect};
-use typst::eval::{Module, Scope};
-use typst::font::{Font, FontWeight};
-use typst::model::Guard;
-use typst::util::option_eq;
+use typst_utils::singleton;
 use unicode_math_class::MathClass;
 
-use self::ctx::*;
-use self::fragment::*;
-use self::row::*;
-use self::spacing::*;
-use crate::layout::{BoxElem, HElem, ParElem, Spacing};
-use crate::meta::Supplement;
-use crate::meta::{
-    Count, Counter, CounterUpdate, LocalName, Numbering, Outlinable, Refable,
+use crate::foundations::{
+    category, elem, Category, Content, Module, NativeElement, Scope,
 };
-use crate::prelude::*;
-use crate::shared::BehavedBuilder;
-use crate::text::{
-    families, variant, FontFamily, FontList, LinebreakElem, SpaceElem, TextElem, TextSize,
-};
+use crate::layout::{Em, HElem};
+use crate::text::TextElem;
+
+/// Typst has special [syntax]($syntax/#math) and library functions to typeset
+/// mathematical formulas. Math formulas can be displayed inline with text or as
+/// separate blocks. They will be typeset into their own block if they start and
+/// end with at least one space (e.g. `[$ x^2 $]`).
+///
+/// # Variables
+/// In math, single letters are always displayed as is. Multiple letters,
+/// however, are interpreted as variables and functions. To display multiple
+/// letters verbatim, you can place them into quotes and to access single letter
+/// variables, you can use the [hash syntax]($scripting/#expressions).
+///
+/// ```example
+/// $ A = pi r^2 $
+/// $ "area" = pi dot "radius"^2 $
+/// $ cal(A) :=
+///     { x in RR | x "is natural" } $
+/// #let x = 5
+/// $ #x < 17 $
+/// ```
+///
+/// # Symbols
+/// Math mode makes a wide selection of [symbols]($category/symbols/sym) like
+/// `pi`, `dot`, or `RR` available. Many mathematical symbols are available in
+/// different variants. You can select between different variants by applying
+/// [modifiers]($symbol) to the symbol. Typst further recognizes a number of
+/// shorthand sequences like `=>` that approximate a symbol. When such a
+/// shorthand exists, the symbol's documentation lists it.
+///
+/// ```example
+/// $ x < y => x gt.eq.not y $
+/// ```
+///
+/// # Line Breaks
+/// Formulas can also contain line breaks. Each line can contain one or multiple
+/// _alignment points_ (`&`) which are then aligned.
+///
+/// ```example
+/// $ sum_(k=0)^n k
+///     &= 1 + ... + n \
+///     &= (n(n+1)) / 2 $
+/// ```
+///
+/// # Function calls
+/// Math mode supports special function calls without the hash prefix. In these
+/// "math calls", the argument list works a little differently than in code:
+///
+/// - Within them, Typst is still in "math mode". Thus, you can write math
+///   directly into them, but need to use hash syntax to pass code expressions
+///   (except for strings, which are available in the math syntax).
+/// - They support positional and named arguments, as well as argument
+///   spreading.
+/// - They don't support trailing content blocks.
+/// - They provide additional syntax for 2-dimensional argument lists. The
+///   semicolon (`;`) merges preceding arguments separated by commas into an
+///   array argument.
+///
+/// ```example
+/// $ frac(a^2, 2) $
+/// $ vec(1, 2, delim: "[") $
+/// $ mat(1, 2; 3, 4) $
+/// $ mat(..#range(1, 5).chunks(2)) $
+/// $ lim_x =
+///     op("lim", limits: #true)_x $
+/// ```
+///
+/// To write a verbatim comma or semicolon in a math call, escape it with a
+/// backslash. The colon on the other hand is only recognized in a special way
+/// if directly preceded by an identifier, so to display it verbatim in those
+/// cases, you can just insert a space before it.
+///
+/// Functions calls preceded by a hash are normal code function calls and not
+/// affected by these rules.
+///
+/// # Alignment
+/// When equations include multiple _alignment points_ (`&`), this creates
+/// blocks of alternatingly right- and left-aligned columns. In the example
+/// below, the expression `(3x + y) / 7` is right-aligned and `= 9` is
+/// left-aligned. The word "given" is also left-aligned because `&&` creates two
+/// alignment points in a row, alternating the alignment twice. `& &` and `&&`
+/// behave exactly the same way. Meanwhile, "multiply by 7" is right-aligned
+/// because just one `&` precedes it. Each alignment point simply alternates
+/// between right-aligned/left-aligned.
+///
+/// ```example
+/// $ (3x + y) / 7 &= 9 && "given" \
+///   3x + y &= 63 & "multiply by 7" \
+///   3x &= 63 - y && "subtract y" \
+///   x &= 21 - y/3 & "divide by 3" $
+/// ```
+///
+/// # Math fonts
+/// You can set the math font by with a [show-set rule]($styling/#show-rules) as
+/// demonstrated below. Note that only special OpenType math fonts are suitable
+/// for typesetting maths.
+///
+/// ```example
+/// #show math.equation: set text(font: "Fira Math")
+/// $ sum_(i in NN) 1 + i $
+/// ```
+///
+/// # Math module
+/// All math functions are part of the `math` [module]($scripting/#modules),
+/// which is available by default in equations. Outside of equations, they can
+/// be accessed with the `math.` prefix.
+#[category]
+pub static MATH: Category;
+
+// Spacings.
+pub const THIN: Em = Em::new(1.0 / 6.0);
+pub const MEDIUM: Em = Em::new(2.0 / 9.0);
+pub const THICK: Em = Em::new(5.0 / 18.0);
+pub const QUAD: Em = Em::new(1.0);
+pub const WIDE: Em = Em::new(2.0);
 
 /// Create a module with all math definitions.
 pub fn module() -> Module {
     let mut math = Scope::deduplicating();
-    math.define("equation", EquationElem::func());
-    math.define("text", TextElem::func());
-
-    // Grouping.
-    math.define("lr", LrElem::func());
-    math.define("abs", abs_func());
-    math.define("norm", norm_func());
-    math.define("floor", floor_func());
-    math.define("ceil", ceil_func());
-    math.define("round", round_func());
-
-    // Attachments and accents.
-    math.define("attach", AttachElem::func());
-    math.define("scripts", ScriptsElem::func());
-    math.define("limits", LimitsElem::func());
-    math.define("accent", AccentElem::func());
-    math.define("underline", UnderlineElem::func());
-    math.define("overline", OverlineElem::func());
-    math.define("underbrace", UnderbraceElem::func());
-    math.define("overbrace", OverbraceElem::func());
-    math.define("underbracket", UnderbracketElem::func());
-    math.define("overbracket", OverbracketElem::func());
-    math.define("cancel", CancelElem::func());
-
-    // Fractions and matrix-likes.
-    math.define("frac", FracElem::func());
-    math.define("binom", BinomElem::func());
-    math.define("vec", VecElem::func());
-    math.define("mat", MatElem::func());
-    math.define("cases", CasesElem::func());
-
-    // Roots.
-    math.define("sqrt", sqrt_func());
-    math.define("root", RootElem::func());
-
-    // Styles.
-    math.define("upright", upright_func());
-    math.define("bold", bold_func());
-    math.define("italic", italic_func());
-    math.define("serif", serif_func());
-    math.define("sans", sans_func());
-    math.define("cal", cal_func());
-    math.define("frak", frak_func());
-    math.define("mono", mono_func());
-    math.define("bb", bb_func());
-
-    math.define("display", display_func());
-    math.define("inline", inline_func());
-    math.define("script", script_func());
-    math.define("sscript", sscript_func());
-
-    math.define("class", ClassElem::func());
+    math.category(MATH);
+    math.define_elem::<EquationElem>();
+    math.define_elem::<TextElem>();
+    math.define_elem::<LrElem>();
+    math.define_elem::<MidElem>();
+    math.define_elem::<AttachElem>();
+    math.define_elem::<StretchElem>();
+    math.define_elem::<ScriptsElem>();
+    math.define_elem::<LimitsElem>();
+    math.define_elem::<AccentElem>();
+    math.define_elem::<UnderlineElem>();
+    math.define_elem::<OverlineElem>();
+    math.define_elem::<UnderbraceElem>();
+    math.define_elem::<OverbraceElem>();
+    math.define_elem::<UnderbracketElem>();
+    math.define_elem::<OverbracketElem>();
+    math.define_elem::<UnderparenElem>();
+    math.define_elem::<OverparenElem>();
+    math.define_elem::<UndershellElem>();
+    math.define_elem::<OvershellElem>();
+    math.define_elem::<CancelElem>();
+    math.define_elem::<FracElem>();
+    math.define_elem::<BinomElem>();
+    math.define_elem::<VecElem>();
+    math.define_elem::<MatElem>();
+    math.define_elem::<CasesElem>();
+    math.define_elem::<RootElem>();
+    math.define_elem::<ClassElem>();
+    math.define_elem::<OpElem>();
+    math.define_elem::<PrimesElem>();
+    math.define_func::<abs>();
+    math.define_func::<norm>();
+    math.define_func::<round>();
+    math.define_func::<sqrt>();
+    math.define_func::<upright>();
+    math.define_func::<bold>();
+    math.define_func::<italic>();
+    math.define_func::<serif>();
+    math.define_func::<sans>();
+    math.define_func::<cal>();
+    math.define_func::<frak>();
+    math.define_func::<mono>();
+    math.define_func::<bb>();
+    math.define_func::<display>();
+    math.define_func::<inline>();
+    math.define_func::<script>();
+    math.define_func::<sscript>();
 
     // Text operators.
-    math.define("op", OpElem::func());
     op::define(&mut math);
 
     // Spacings.
-    spacing::define(&mut math);
+    math.define("thin", HElem::new(THIN.into()).pack());
+    math.define("med", HElem::new(MEDIUM.into()).pack());
+    math.define("thick", HElem::new(THICK.into()).pack());
+    math.define("quad", HElem::new(QUAD.into()).pack());
+    math.define("wide", HElem::new(WIDE.into()).pack());
 
     // Symbols.
-    for (name, symbol) in crate::symbols::SYM {
-        math.define(*name, symbol.clone());
-    }
+    crate::symbols::define_math(&mut math);
 
-    Module::new("math").with_scope(math)
+    Module::new("math", math)
 }
 
-/// A mathematical equation.
+/// Trait for recognizing math elements and auto-wrapping them in equations.
+pub trait Mathy {}
+
+/// A math alignment point: `&`, `&&`.
+#[elem(title = "Alignment Point", Mathy)]
+pub struct AlignPointElem {}
+
+impl AlignPointElem {
+    /// Get the globally shared alignment point element.
+    pub fn shared() -> &'static Content {
+        singleton!(Content, AlignPointElem::new().pack())
+    }
+}
+
+/// Forced use of a certain math class.
 ///
-/// Can be displayed inline with text or as a separate block.
+/// This is useful to treat certain symbols as if they were of a different
+/// class, e.g. to make a symbol behave like a relation. The class of a symbol
+/// defines the way it is laid out, including spacing around it, and how its
+/// scripts are attached by default. Note that the latter can always be
+/// overridden using [`{limits}`](math.limits) and [`{scripts}`](math.scripts).
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
-/// #set text(font: "New Computer Modern")
+/// #let loves = math.class(
+///   "relation",
+///   sym.suit.heart,
+/// )
 ///
-/// Let $a$, $b$, and $c$ be the side
-/// lengths of right-angled triangle.
-/// Then, we know that:
-/// $ a^2 + b^2 = c^2 $
-///
-/// Prove by induction:
-/// $ sum_(k=1)^n k = (n(n+1)) / 2 $
+/// $x loves y and y loves 5$
 /// ```
-///
-/// ## Syntax { #syntax }
-/// This function also has dedicated syntax: Write mathematical markup within
-/// dollar signs to create an equation. Starting and ending the equation with at
-/// least one space lifts it into a separate block that is centered
-/// horizontally. For more details about math syntax, see the
-/// [main math page]($category/math).
-///
-/// Display: Equation
-/// Category: math
-#[element(
-    Locatable, Synthesize, Show, Finalize, Layout, LayoutMath, Count, LocalName, Refable,
-    Outlinable
-)]
-pub struct EquationElem {
-    /// Whether the equation is displayed as a separate block.
-    #[default(false)]
-    pub block: bool,
+#[elem(Mathy)]
+pub struct ClassElem {
+    /// The class to apply to the content.
+    #[required]
+    pub class: MathClass,
 
-    /// How to [number]($func/numbering) block-level equations.
-    ///
-    /// ```example
-    /// #set math.equation(numbering: "(1)")
-    ///
-    /// We define:
-    /// $ phi.alt := (1 + sqrt(5)) / 2 $ <ratio>
-    ///
-    /// With @ratio, we get:
-    /// $ F_n = floor(1 / sqrt(5) phi.alt^n) $
-    /// ```
-    pub numbering: Option<Numbering>,
-
-    /// A supplement for the equation.
-    ///
-    /// For references to equations, this is added before the referenced number.
-    ///
-    /// If a function is specified, it is passed the referenced equation and
-    /// should return content.
-    ///
-    /// ```example
-    /// #set math.equation(numbering: "(1)", supplement: [Eq.])
-    ///
-    /// We define:
-    /// $ phi.alt := (1 + sqrt(5)) / 2 $ <ratio>
-    ///
-    /// With @ratio, we get:
-    /// $ F_n = floor(1 / sqrt(5) phi.alt^n) $
-    /// ```
-    pub supplement: Smart<Option<Supplement>>,
-
-    /// The contents of the equation.
+    /// The content to which the class is applied.
     #[required]
     pub body: Content,
-}
-
-impl Synthesize for EquationElem {
-    fn synthesize(&mut self, vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
-        // Resolve the supplement.
-        let supplement = match self.supplement(styles) {
-            Smart::Auto => TextElem::packed(self.local_name_in(styles)),
-            Smart::Custom(None) => Content::empty(),
-            Smart::Custom(Some(supplement)) => supplement.resolve(vt, [self.clone()])?,
-        };
-
-        self.push_block(self.block(styles));
-        self.push_numbering(self.numbering(styles));
-        self.push_supplement(Smart::Custom(Some(Supplement::Content(supplement))));
-
-        Ok(())
-    }
-}
-
-impl Show for EquationElem {
-    #[tracing::instrument(name = "EquationElem::show", skip_all)]
-    fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
-        let mut realized = self.clone().pack().guarded(Guard::Base(Self::func()));
-        if self.block(styles) {
-            realized = realized.aligned(Axes::with_x(Some(Align::Center.into())))
-        }
-        Ok(realized)
-    }
-}
-
-impl Finalize for EquationElem {
-    fn finalize(&self, realized: Content, _: StyleChain) -> Content {
-        realized
-            .styled(TextElem::set_weight(FontWeight::from_number(450)))
-            .styled(TextElem::set_font(FontList(vec![FontFamily::new(
-                "New Computer Modern Math",
-            )])))
-    }
-}
-
-impl Layout for EquationElem {
-    #[tracing::instrument(name = "EquationElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        const NUMBER_GUTTER: Em = Em::new(0.5);
-
-        let block = self.block(styles);
-
-        // Find a math font.
-        let variant = variant(styles);
-        let world = vt.world;
-        let Some(font) = families(styles)
-            .find_map(|family| {
-                let id = world.book().select(family.as_str(), variant)?;
-                let font = world.font(id)?;
-                let _ = font.ttf().tables().math?.constants?;
-                Some(font)
-            })
-        else {
-            bail!(self.span(), "current font does not support math");
-        };
-
-        let mut ctx = MathContext::new(vt, styles, regions, &font, block);
-        let mut frame = ctx.layout_frame(self)?;
-
-        if block {
-            if let Some(numbering) = self.numbering(styles) {
-                let pod = Regions::one(regions.base(), Axes::splat(false));
-                let counter = Counter::of(Self::func())
-                    .display(Some(numbering), false)
-                    .layout(vt, styles, pod)?
-                    .into_frame();
-
-                let width = if regions.size.x.is_finite() {
-                    regions.size.x
-                } else {
-                    frame.width()
-                        + 2.0 * (counter.width() + NUMBER_GUTTER.resolve(styles))
-                };
-
-                let height = frame.height().max(counter.height());
-                frame.resize(Size::new(width, height), Align::CENTER_HORIZON);
-
-                let x = if TextElem::dir_in(styles).is_positive() {
-                    frame.width() - counter.width()
-                } else {
-                    Abs::zero()
-                };
-                let y = (frame.height() - counter.height()) / 2.0;
-
-                frame.push_frame(Point::new(x, y), counter)
-            }
-        } else {
-            let slack = ParElem::leading_in(styles) * 0.7;
-            let top_edge = TextElem::top_edge_in(styles).resolve(styles, &font, None);
-            let bottom_edge =
-                -TextElem::bottom_edge_in(styles).resolve(styles, &font, None);
-
-            let ascent = top_edge.max(frame.ascent() - slack);
-            let descent = bottom_edge.max(frame.descent() - slack);
-            frame.translate(Point::with_y(ascent - frame.baseline()));
-            frame.size_mut().y = ascent + descent;
-        }
-
-        // Apply metadata.
-        frame.meta(styles, false);
-
-        Ok(Fragment::frame(frame))
-    }
-}
-
-impl Count for EquationElem {
-    fn update(&self) -> Option<CounterUpdate> {
-        (self.block(StyleChain::default())
-            && self.numbering(StyleChain::default()).is_some())
-        .then(|| CounterUpdate::Step(NonZeroUsize::ONE))
-    }
-}
-
-impl LocalName for EquationElem {
-    fn local_name(&self, lang: Lang, region: Option<Region>) -> &'static str {
-        match lang {
-            Lang::ALBANIAN => "Ekuacion",
-            Lang::ARABIC => "معادلة",
-            Lang::BOKMÅL => "Ligning",
-            Lang::CHINESE if option_eq(region, "TW") => "方程式",
-            Lang::CHINESE => "等式",
-            Lang::CZECH => "Rovnice",
-            Lang::DANISH => "Ligning",
-            Lang::DUTCH => "Vergelijking",
-            Lang::FILIPINO => "Ekwasyon",
-            Lang::FRENCH => "Équation",
-            Lang::GERMAN => "Gleichung",
-            Lang::ITALIAN => "Equazione",
-            Lang::NYNORSK => "Likning",
-            Lang::POLISH => "Równanie",
-            Lang::PORTUGUESE => "Equação",
-            Lang::RUSSIAN => "Уравнение",
-            Lang::SLOVENIAN => "Enačba",
-            Lang::SPANISH => "Ecuación",
-            Lang::SWEDISH => "Ekvation",
-            Lang::TURKISH => "Denklem",
-            Lang::UKRAINIAN => "Рівняння",
-            Lang::VIETNAMESE => "Phương trình",
-            Lang::JAPANESE => "式",
-            Lang::ENGLISH | _ => "Equation",
-        }
-    }
-}
-
-impl Refable for EquationElem {
-    fn supplement(&self) -> Content {
-        // After synthesis, this should always be custom content.
-        match self.supplement(StyleChain::default()) {
-            Smart::Custom(Some(Supplement::Content(content))) => content,
-            _ => Content::empty(),
-        }
-    }
-
-    fn counter(&self) -> Counter {
-        Counter::of(Self::func())
-    }
-
-    fn numbering(&self) -> Option<Numbering> {
-        self.numbering(StyleChain::default())
-    }
-}
-
-impl Outlinable for EquationElem {
-    fn outline(&self, vt: &mut Vt) -> SourceResult<Option<Content>> {
-        let Some(numbering) = self.numbering(StyleChain::default()) else {
-            return Ok(None);
-        };
-
-        // After synthesis, this should always be custom content.
-        let mut supplement = match self.supplement(StyleChain::default()) {
-            Smart::Custom(Some(Supplement::Content(content))) => content,
-            _ => Content::empty(),
-        };
-
-        if !supplement.is_empty() {
-            supplement += TextElem::packed("\u{a0}");
-        }
-
-        let numbers = self
-            .counter()
-            .at(vt, self.0.location().unwrap())?
-            .display(vt, &numbering)?;
-
-        Ok(Some(supplement + numbers))
-    }
-}
-
-pub trait LayoutMath {
-    fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()>;
-}
-
-impl LayoutMath for EquationElem {
-    #[tracing::instrument(skip(ctx))]
-    fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
-        self.body().layout_math(ctx)
-    }
-}
-
-impl LayoutMath for Content {
-    #[tracing::instrument(skip(ctx))]
-    fn layout_math(&self, ctx: &mut MathContext) -> SourceResult<()> {
-        // Directly layout the body of nested equations instead of handling it
-        // like a normal equation so that things like this work:
-        // ```
-        // #let my = $pi$
-        // $ my r^2 $
-        // ```
-        if let Some(elem) = self.to::<EquationElem>() {
-            return elem.layout_math(ctx);
-        }
-
-        if let Some(realized) = ctx.realize(self)? {
-            return realized.layout_math(ctx);
-        }
-
-        if let Some(children) = self.to_sequence() {
-            let mut bb = BehavedBuilder::new();
-            for child in children {
-                bb.push(child.clone(), StyleChain::default());
-            }
-            for (child, _) in bb.finish().0.iter() {
-                child.layout_math(ctx)?;
-            }
-            return Ok(());
-        }
-
-        if let Some((elem, styles)) = self.to_styled() {
-            if TextElem::font_in(ctx.styles().chain(styles))
-                != TextElem::font_in(ctx.styles())
-            {
-                let frame = ctx.layout_content(self)?;
-                ctx.push(FrameFragment::new(ctx, frame).with_spaced(true));
-                return Ok(());
-            }
-
-            let prev_map = std::mem::replace(&mut ctx.local, styles.clone());
-            let prev_size = ctx.size;
-            ctx.local.apply(prev_map.clone());
-            ctx.size = TextElem::size_in(ctx.styles());
-            elem.layout_math(ctx)?;
-            ctx.size = prev_size;
-            ctx.local = prev_map;
-            return Ok(());
-        }
-
-        if self.is::<SpaceElem>() {
-            ctx.push(MathFragment::Space(ctx.space_width.scaled(ctx)));
-            return Ok(());
-        }
-
-        if self.is::<LinebreakElem>() {
-            ctx.push(MathFragment::Linebreak);
-            return Ok(());
-        }
-
-        if let Some(elem) = self.to::<HElem>() {
-            if let Spacing::Rel(rel) = elem.amount() {
-                if rel.rel.is_zero() {
-                    ctx.push(MathFragment::Spacing(rel.abs.resolve(ctx.styles())));
-                }
-            }
-            return Ok(());
-        }
-
-        if let Some(elem) = self.to::<TextElem>() {
-            let fragment = ctx.layout_text(elem)?;
-            ctx.push(fragment);
-            return Ok(());
-        }
-
-        if let Some(elem) = self.with::<dyn LayoutMath>() {
-            return elem.layout_math(ctx);
-        }
-
-        let mut frame = ctx.layout_content(self)?;
-        if !frame.has_baseline() {
-            if self.is::<BoxElem>() {
-                frame.set_baseline(frame.height());
-            } else {
-                let axis = scaled!(ctx, axis_height);
-                frame.set_baseline(frame.height() / 2.0 + axis);
-            }
-        }
-        ctx.push(FrameFragment::new(ctx, frame).with_spaced(true));
-
-        Ok(())
-    }
 }
