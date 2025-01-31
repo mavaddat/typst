@@ -1,49 +1,89 @@
-use std::hash::Hash;
-use std::sync::Arc;
+use std::cell::LazyCell;
+use std::ops::Range;
+use std::sync::{Arc, LazyLock};
 
-use once_cell::sync::Lazy;
-use once_cell::unsync::Lazy as UnsyncLazy;
+use comemo::Tracked;
+use ecow::{eco_format, EcoString, EcoVec};
 use syntect::highlighting as synt;
 use syntect::parsing::{SyntaxDefinition, SyntaxSet, SyntaxSetBuilder};
-use typst::diag::FileError;
-use typst::syntax::{self, LinkedNode};
-use typst::util::Bytes;
+use typst_syntax::{split_newlines, LinkedNode, Span, Spanned};
+use typst_utils::ManuallyHash;
+use unicode_segmentation::UnicodeSegmentation;
 
-use super::{
-    FontFamily, FontList, Hyphenate, LinebreakElem, SmartQuoteElem, TextElem, TextSize,
+use super::Lang;
+use crate::diag::{At, FileError, SourceResult, StrResult};
+use crate::engine::Engine;
+use crate::foundations::{
+    cast, elem, scope, Bytes, Content, Derived, NativeElement, OneOrMultiple, Packed,
+    PlainText, Show, ShowSet, Smart, StyleChain, Styles, Synthesize, TargetElem,
 };
-use crate::layout::BlockElem;
-use crate::meta::{Figurable, LocalName};
-use crate::prelude::*;
+use crate::html::{tag, HtmlElem};
+use crate::layout::{BlockBody, BlockElem, Em, HAlignment};
+use crate::loading::{DataSource, Load};
+use crate::model::{Figurable, ParElem};
+use crate::text::{
+    FontFamily, FontList, Hyphenate, LinebreakElem, LocalName, TextElem, TextSize,
+};
+use crate::visualize::Color;
+use crate::World;
 
 /// Raw text with optional syntax highlighting.
 ///
 /// Displays the text verbatim and in a monospace font. This is typically used
 /// to embed computer code into your document.
 ///
-/// ## Example { #example }
+/// # Example
 /// ````example
 /// Adding `rbx` to `rcx` gives
 /// the desired result.
+///
+/// What is ```rust fn main()``` in Rust
+/// would be ```c int main()``` in C.
 ///
 /// ```rust
 /// fn main() {
 ///     println!("Hello World!");
 /// }
 /// ```
+///
+/// This has ``` `backticks` ``` in it
+/// (but the spaces are trimmed). And
+/// ``` here``` the leading space is
+/// also trimmed.
 /// ````
 ///
-/// ## Syntax { #syntax }
+/// You can also construct a [`raw`] element programmatically from a string (and
+/// provide the language tag via the optional [`lang`]($raw.lang) argument).
+/// ```example
+/// #raw("fn " + "main() {}", lang: "rust")
+/// ```
+///
+/// # Syntax
 /// This function also has dedicated syntax. You can enclose text in 1 or 3+
 /// backticks (`` ` ``) to make it raw. Two backticks produce empty raw text.
+/// This works both in markup and code.
+///
 /// When you use three or more backticks, you can additionally specify a
 /// language tag for syntax highlighting directly after the opening backticks.
-/// Within raw blocks, everything is rendered as is, in particular, there are no
-/// escape sequences.
+/// Within raw blocks, everything (except for the language tag, if applicable)
+/// is rendered as is, in particular, there are no escape sequences.
 ///
-/// Display: Raw Text / Code
-/// Category: text
-#[element(Synthesize, Show, Finalize, LocalName, Figurable, PlainText)]
+/// The language tag is an identifier that directly follows the opening
+/// backticks only if there are three or more backticks. If your text starts
+/// with something that looks like an identifier, but no syntax highlighting is
+/// needed, start the text with a single space (which will be trimmed) or use
+/// the single backtick syntax. If your text should start or end with a
+/// backtick, put a space before or after it (it will be trimmed).
+#[elem(
+    scope,
+    title = "Raw Text / Code",
+    Synthesize,
+    Show,
+    ShowSet,
+    LocalName,
+    Figurable,
+    PlainText
+)]
 pub struct RawElem {
     /// The raw text.
     ///
@@ -66,12 +106,13 @@ pub struct RawElem {
     /// ```
     /// ````
     #[required]
-    pub text: EcoString,
+    pub text: RawContent,
 
     /// Whether the raw text is displayed as a separate block.
     ///
-    /// In markup mode, using one-backtick notation makes this `{false}`,
-    /// whereas using three-backtick notation makes it `{true}`.
+    /// In markup mode, using one-backtick notation makes this `{false}`.
+    /// Using three-backtick notation makes it `{true}` if the enclosed content
+    /// contains at least one line break.
     ///
     /// ````example
     /// // Display inline code in a small box
@@ -92,6 +133,8 @@ pub struct RawElem {
     /// )
     ///
     /// With `rg`, you can search through your files quickly.
+    /// This example searches the current directory recursively
+    /// for the text `Hello World`:
     ///
     /// ```bash
     /// rg "Hello World"
@@ -103,14 +146,19 @@ pub struct RawElem {
     /// The language to syntax-highlight in.
     ///
     /// Apart from typical language tags known from Markdown, this supports the
-    /// `{"typ"}` and `{"typc"}` tags for Typst markup and Typst code,
-    /// respectively.
+    /// `{"typ"}`, `{"typc"}`, and `{"typm"}` tags for
+    /// [Typst markup]($reference/syntax/#markup),
+    /// [Typst code]($reference/syntax/#code), and
+    /// [Typst math]($reference/syntax/#math), respectively.
     ///
     /// ````example
     /// ```typ
     /// This is *Typst!*
     /// ```
+    ///
+    /// This is ```typ also *Typst*```, but inline!
     /// ````
+    #[borrowed]
     pub lang: Option<EcoString>,
 
     /// The horizontal alignment that each line in a raw block should have.
@@ -131,11 +179,18 @@ pub struct RawElem {
     /// code = "centered"
     /// ```
     /// ````
-    #[default(HorizontalAlign(GenAlign::Start))]
-    pub align: HorizontalAlign,
+    #[default(HAlignment::Start)]
+    pub align: HAlignment,
 
-    /// One or multiple additional syntax definitions to load. The syntax
-    /// definitions should be in the `sublime-syntax` file format.
+    /// Additional syntax definitions to load. The syntax definitions should be
+    /// in the [`sublime-syntax` file format](https://www.sublimetext.com/docs/syntax.html).
+    ///
+    /// You can pass any of the following values:
+    ///
+    /// - A path string to load a syntax file from the given path. For more
+    ///   details about paths, see the [Paths section]($syntax/#paths).
+    /// - Raw bytes from which the syntax should be decoded.
+    /// - An array where each item is one the above.
     ///
     /// ````example
     /// #set raw(syntaxes: "SExpressions.sublime-syntax")
@@ -148,46 +203,89 @@ pub struct RawElem {
     ///     (* x (factorial (- x 1)))))
     /// ```
     /// ````
-    #[parse(
-        let (syntaxes, syntaxes_data) = parse_syntaxes(vm, args)?;
-        syntaxes
-    )]
+    #[parse(match args.named("syntaxes")? {
+        Some(sources) => Some(RawSyntax::load(engine.world, sources)?),
+        None => None,
+    })]
     #[fold]
-    pub syntaxes: SyntaxPaths,
+    pub syntaxes: Derived<OneOrMultiple<DataSource>, Vec<RawSyntax>>,
 
-    /// The raw file buffers of syntax definition files.
-    #[internal]
-    #[parse(syntaxes_data)]
-    #[fold]
-    pub syntaxes_data: Vec<Bytes>,
-
-    /// The theme to use for syntax highlighting. Theme files should be in the in the
-    /// `tmTheme` file format.
+    /// The theme to use for syntax highlighting. Themes should be in the
+    /// [`tmTheme` file format](https://www.sublimetext.com/docs/color_schemes_tmtheme.html).
+    ///
+    /// You can pass any of the following values:
+    ///
+    /// - `{none}`: Disables syntax highlighting.
+    /// - `{auto}`: Highlights with Typst's default theme.
+    /// - A path string to load a theme file from the given path. For more
+    ///   details about paths, see the [Paths section]($syntax/#paths).
+    /// - Raw bytes from which the theme should be decoded.
+    ///
+    /// Applying a theme only affects the color of specifically highlighted
+    /// text. It does not consider the theme's foreground and background
+    /// properties, so that you retain control over the color of raw text. You
+    /// can apply the foreground color yourself with the [`text`] function and
+    /// the background with a [filled block]($block.fill). You could also use
+    /// the [`xml`] function to extract these properties from the theme.
     ///
     /// ````example
     /// #set raw(theme: "halcyon.tmTheme")
+    /// #show raw: it => block(
+    ///   fill: rgb("#1d2433"),
+    ///   inset: 8pt,
+    ///   radius: 5pt,
+    ///   text(fill: rgb("#a2aabc"), it)
+    /// )
     ///
     /// ```typ
     /// = Chapter 1
     /// #let hi = "Hello World"
     /// ```
     /// ````
-    #[parse(
-        let (theme_path, theme_data) = parse_theme(vm, args)?;
-        theme_path.map(Some)
-    )]
-    pub theme: Option<EcoString>,
+    #[parse(match args.named::<Spanned<Smart<Option<DataSource>>>>("theme")? {
+        Some(Spanned { v: Smart::Custom(Some(source)), span }) => Some(Smart::Custom(
+            Some(RawTheme::load(engine.world, Spanned::new(source, span))?)
+        )),
+        Some(Spanned { v: Smart::Custom(None), .. }) => Some(Smart::Custom(None)),
+        Some(Spanned { v: Smart::Auto, .. }) => Some(Smart::Auto),
+        None => None,
+    })]
+    #[borrowed]
+    pub theme: Smart<Option<Derived<DataSource, RawTheme>>>,
 
-    /// The raw file buffer of syntax theme file.
-    #[internal]
-    #[parse(theme_data.map(Some))]
-    pub theme_data: Option<Bytes>,
+    /// The size for a tab stop in spaces. A tab is replaced with enough spaces to
+    /// align with the next multiple of the size.
+    ///
+    /// ````example
+    /// #set raw(tab-size: 8)
+    /// ```tsv
+    /// Year	Month	Day
+    /// 2000	2	3
+    /// 2001	2	1
+    /// 2002	3	10
+    /// ```
+    /// ````
+    #[default(2)]
+    pub tab_size: usize,
+
+    /// The stylized lines of raw text.
+    ///
+    /// Made accessible for the [`raw.line` element]($raw.line).
+    /// Allows more styling control in `show` rules.
+    #[synthesized]
+    pub lines: Vec<Packed<RawLine>>,
+}
+
+#[scope]
+impl RawElem {
+    #[elem]
+    type RawLine;
 }
 
 impl RawElem {
     /// The supported language names and tags.
     pub fn languages() -> Vec<(&'static str, Vec<&'static str>)> {
-        SYNTAXES
+        RAW_SYNTAXES
             .syntaxes()
             .iter()
             .map(|syntax| {
@@ -196,333 +294,588 @@ impl RawElem {
                     syntax.file_extensions.iter().map(|s| s.as_str()).collect(),
                 )
             })
-            .chain([("Typst", vec!["typ"]), ("Typst (code)", vec!["typc"])])
+            .chain([
+                ("Typst", vec!["typ"]),
+                ("Typst (code)", vec!["typc"]),
+                ("Typst (math)", vec!["typm"]),
+            ])
             .collect()
     }
 }
 
-impl Synthesize for RawElem {
-    fn synthesize(&mut self, _vt: &mut Vt, styles: StyleChain) -> SourceResult<()> {
-        self.push_lang(self.lang(styles));
+impl Synthesize for Packed<RawElem> {
+    fn synthesize(&mut self, _: &mut Engine, styles: StyleChain) -> SourceResult<()> {
+        let seq = self.highlight(styles);
+        self.push_lines(seq);
         Ok(())
     }
 }
 
-impl Show for RawElem {
-    #[tracing::instrument(name = "RawElem::show", skip_all)]
-    fn show(&self, _: &mut Vt, styles: StyleChain) -> SourceResult<Content> {
-        let text = self.text();
-        let lang = self
+impl Packed<RawElem> {
+    #[comemo::memoize]
+    fn highlight(&self, styles: StyleChain) -> Vec<Packed<RawLine>> {
+        let elem = self.as_ref();
+        let lines = preprocess(&elem.text, styles, self.span());
+
+        let count = lines.len() as i64;
+        let lang = elem
             .lang(styles)
+            .as_ref()
             .as_ref()
             .map(|s| s.to_lowercase())
             .or(Some("txt".into()));
 
-        let extra_syntaxes = UnsyncLazy::new(|| {
-            load_syntaxes(&self.syntaxes(styles), &self.syntaxes_data(styles)).unwrap()
-        });
+        let non_highlighted_result = |lines: EcoVec<(EcoString, Span)>| {
+            lines.into_iter().enumerate().map(|(i, (line, line_span))| {
+                Packed::new(RawLine::new(
+                    i as i64 + 1,
+                    count,
+                    line.clone(),
+                    TextElem::packed(line).spanned(line_span),
+                ))
+                .spanned(line_span)
+            })
+        };
 
-        let theme = self.theme(styles).map(|theme_path| {
-            load_theme(theme_path, self.theme_data(styles).unwrap()).unwrap()
-        });
+        let syntaxes = LazyCell::new(|| elem.syntaxes(styles));
+        let theme: &synt::Theme = match elem.theme(styles) {
+            Smart::Auto => &RAW_THEME,
+            Smart::Custom(Some(theme)) => theme.derived.get(),
+            Smart::Custom(None) => return non_highlighted_result(lines).collect(),
+        };
 
-        let theme = theme.as_deref().unwrap_or(&THEME);
+        let foreground = theme.settings.foreground.unwrap_or(synt::Color::BLACK);
 
-        let foreground = theme
-            .settings
-            .foreground
-            .map(to_typst)
-            .map_or(Color::BLACK, Color::from);
-
-        let mut realized = if matches!(lang.as_deref(), Some("typ" | "typst" | "typc")) {
+        let mut seq = vec![];
+        if matches!(lang.as_deref(), Some("typ" | "typst" | "typc" | "typm")) {
+            let text =
+                lines.iter().map(|(s, _)| s.clone()).collect::<Vec<_>>().join("\n");
             let root = match lang.as_deref() {
-                Some("typc") => syntax::parse_code(&text),
-                _ => syntax::parse(&text),
+                Some("typc") => typst_syntax::parse_code(&text),
+                Some("typm") => typst_syntax::parse_math(&text),
+                _ => typst_syntax::parse(&text),
             };
 
-            let mut seq = vec![];
-            let highlighter = synt::Highlighter::new(theme);
-            highlight_themed(
-                &LinkedNode::new(&root),
-                vec![],
-                &highlighter,
-                &mut |node, style| {
-                    seq.push(styled(&text[node.range()], foreground.into(), style));
+            ThemedHighlighter::new(
+                &text,
+                LinkedNode::new(&root),
+                synt::Highlighter::new(theme),
+                &mut |i, _, range, style| {
+                    // Find span and start of line.
+                    // Note: Dedent is already applied to the text
+                    let span = lines.get(i).map_or_else(Span::detached, |l| l.1);
+                    let span_offset = text[..range.start]
+                        .rfind('\n')
+                        .map_or(0, |i| range.start - (i + 1));
+                    styled(&text[range], foreground, style, span, span_offset)
                 },
-            );
-
-            Content::sequence(seq)
+                &mut |i, range, line| {
+                    let span = lines.get(i).map_or_else(Span::detached, |l| l.1);
+                    seq.push(
+                        Packed::new(RawLine::new(
+                            (i + 1) as i64,
+                            count,
+                            EcoString::from(&text[range]),
+                            Content::sequence(line.drain(..)),
+                        ))
+                        .spanned(span),
+                    );
+                },
+            )
+            .highlight();
         } else if let Some((syntax_set, syntax)) = lang.and_then(|token| {
-            SYNTAXES
-                .find_syntax_by_token(&token)
-                .map(|syntax| (&*SYNTAXES, syntax))
-                .or_else(|| {
-                    extra_syntaxes
-                        .find_syntax_by_token(&token)
-                        .map(|syntax| (&**extra_syntaxes, syntax))
+            // Prefer user-provided syntaxes over built-in ones.
+            syntaxes
+                .derived
+                .iter()
+                .map(|syntax| syntax.get())
+                .chain(std::iter::once(&*RAW_SYNTAXES))
+                .find_map(|set| {
+                    set.find_syntax_by_token(&token).map(|syntax| (set, syntax))
                 })
         }) {
-            let mut seq = vec![];
             let mut highlighter = syntect::easy::HighlightLines::new(syntax, theme);
-            for (i, line) in text.lines().enumerate() {
-                if i != 0 {
-                    seq.push(LinebreakElem::new().pack());
+            for (i, (line, line_span)) in lines.into_iter().enumerate() {
+                let mut line_content = vec![];
+                let mut span_offset = 0;
+                for (style, piece) in highlighter
+                    .highlight_line(line.as_str(), syntax_set)
+                    .into_iter()
+                    .flatten()
+                {
+                    line_content.push(styled(
+                        piece,
+                        foreground,
+                        style,
+                        line_span,
+                        span_offset,
+                    ));
+                    span_offset += piece.len();
                 }
 
-                for (style, piece) in
-                    highlighter.highlight_line(line, syntax_set).into_iter().flatten()
-                {
-                    seq.push(styled(piece, foreground.into(), style));
-                }
+                seq.push(
+                    Packed::new(RawLine::new(
+                        i as i64 + 1,
+                        count,
+                        line,
+                        Content::sequence(line_content),
+                    ))
+                    .spanned(line_span),
+                );
+            }
+        } else {
+            seq.extend(non_highlighted_result(lines));
+        };
+
+        seq
+    }
+}
+
+impl Show for Packed<RawElem> {
+    #[typst_macros::time(name = "raw", span = self.span())]
+    fn show(&self, _: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
+        let lines = self.lines().map(|v| v.as_slice()).unwrap_or_default();
+
+        let mut seq = EcoVec::with_capacity((2 * lines.len()).saturating_sub(1));
+        for (i, line) in lines.iter().enumerate() {
+            if i != 0 {
+                seq.push(LinebreakElem::shared().clone());
             }
 
-            Content::sequence(seq)
-        } else {
-            TextElem::packed(text)
-        };
+            seq.push(line.clone().pack());
+        }
+
+        let mut realized = Content::sequence(seq);
+
+        if TargetElem::target_in(styles).is_html() {
+            return Ok(HtmlElem::new(tag::pre)
+                .with_body(Some(realized))
+                .pack()
+                .spanned(self.span()));
+        }
 
         if self.block(styles) {
             // Align the text before inserting it into the block.
-            realized = realized.aligned(Axes::with_x(Some(self.align(styles).into())));
-            realized = BlockElem::new().with_body(Some(realized)).pack();
+            realized = realized.aligned(self.align(styles).into());
+            realized = BlockElem::new()
+                .with_body(Some(BlockBody::Content(realized)))
+                .pack()
+                .spanned(self.span());
         }
 
         Ok(realized)
     }
 }
 
-impl Finalize for RawElem {
-    fn finalize(&self, realized: Content, _: StyleChain) -> Content {
-        let mut styles = Styles::new();
-        styles.set(TextElem::set_overhang(false));
-        styles.set(TextElem::set_hyphenate(Hyphenate(Smart::Custom(false))));
-        styles.set(TextElem::set_size(TextSize(Em::new(0.8).into())));
-        styles
-            .set(TextElem::set_font(FontList(vec![FontFamily::new("DejaVu Sans Mono")])));
-        styles.set(SmartQuoteElem::set_enabled(false));
-        realized.styled_with_map(styles)
-    }
-}
-
-impl LocalName for RawElem {
-    fn local_name(&self, lang: Lang, _: Option<Region>) -> &'static str {
-        match lang {
-            Lang::ALBANIAN => "List",
-            Lang::ARABIC => "قائمة",
-            Lang::BOKMÅL => "Utskrift",
-            Lang::CHINESE => "代码",
-            Lang::CZECH => "Seznam",
-            Lang::DANISH => "Liste",
-            Lang::DUTCH => "Listing",
-            Lang::FILIPINO => "Listahan",
-            Lang::FRENCH => "Liste",
-            Lang::GERMAN => "Listing",
-            Lang::ITALIAN => "Codice",
-            Lang::NYNORSK => "Utskrift",
-            Lang::POLISH => "Program",
-            Lang::RUSSIAN => "Листинг",
-            Lang::SLOVENIAN => "Program",
-            Lang::SWEDISH => "Listing",
-            Lang::TURKISH => "Liste",
-            Lang::UKRAINIAN => "Лістинг",
-            Lang::VIETNAMESE => "Chương trình", // TODO: This may be wrong.
-            Lang::JAPANESE => "リスト",
-            Lang::ENGLISH | _ => "Listing",
+impl ShowSet for Packed<RawElem> {
+    fn show_set(&self, styles: StyleChain) -> Styles {
+        let mut out = Styles::new();
+        out.set(TextElem::set_overhang(false));
+        out.set(TextElem::set_lang(Lang::ENGLISH));
+        out.set(TextElem::set_hyphenate(Hyphenate(Smart::Custom(false))));
+        out.set(TextElem::set_size(TextSize(Em::new(0.8).into())));
+        out.set(TextElem::set_font(FontList(vec![FontFamily::new("DejaVu Sans Mono")])));
+        out.set(TextElem::set_cjk_latin_spacing(Smart::Custom(None)));
+        if self.block(styles) {
+            out.set(ParElem::set_justify(false));
         }
+        out
     }
 }
 
-impl Figurable for RawElem {}
+impl LocalName for Packed<RawElem> {
+    const KEY: &'static str = "raw";
+}
 
-impl PlainText for RawElem {
+impl Figurable for Packed<RawElem> {}
+
+impl PlainText for Packed<RawElem> {
     fn plain_text(&self, text: &mut EcoString) {
-        text.push_str(&self.text());
+        text.push_str(&self.text.get());
     }
 }
 
-/// Highlight a syntax node in a theme by calling `f` with ranges and their
-/// styles.
-fn highlight_themed<F>(
-    node: &LinkedNode,
-    scopes: Vec<syntect::parsing::Scope>,
-    highlighter: &synt::Highlighter,
-    f: &mut F,
-) where
-    F: FnMut(&LinkedNode, synt::Style),
-{
-    if node.children().len() == 0 {
-        let style = highlighter.style_for_stack(&scopes);
-        f(node, style);
-        return;
+/// The content of the raw text.
+#[derive(Debug, Clone, Hash, PartialEq)]
+pub enum RawContent {
+    /// From a string.
+    Text(EcoString),
+    /// From lines of text.
+    Lines(EcoVec<(EcoString, Span)>),
+}
+
+impl RawContent {
+    /// Returns or synthesizes the text content of the raw text.
+    fn get(&self) -> EcoString {
+        match self.clone() {
+            RawContent::Text(text) => text,
+            RawContent::Lines(lines) => {
+                let mut lines = lines.into_iter().map(|(s, _)| s);
+                if lines.len() <= 1 {
+                    lines.next().unwrap_or_default()
+                } else {
+                    lines.collect::<Vec<_>>().join("\n").into()
+                }
+            }
+        }
+    }
+}
+
+cast! {
+    RawContent,
+    self => self.get().into_value(),
+    v: EcoString => Self::Text(v),
+}
+
+/// A loaded syntax.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct RawSyntax(Arc<ManuallyHash<SyntaxSet>>);
+
+impl RawSyntax {
+    /// Load syntaxes from sources.
+    fn load(
+        world: Tracked<dyn World + '_>,
+        sources: Spanned<OneOrMultiple<DataSource>>,
+    ) -> SourceResult<Derived<OneOrMultiple<DataSource>, Vec<RawSyntax>>> {
+        let data = sources.load(world)?;
+        let list = sources
+            .v
+            .0
+            .iter()
+            .zip(&data)
+            .map(|(source, data)| Self::decode(source, data))
+            .collect::<StrResult<_>>()
+            .at(sources.span)?;
+        Ok(Derived::new(sources.v, list))
     }
 
-    for child in node.children() {
-        let mut scopes = scopes.clone();
-        if let Some(tag) = typst::ide::highlight(&child) {
-            scopes.push(syntect::parsing::Scope::new(tag.tm_scope()).unwrap())
-        }
-        highlight_themed(&child, scopes, highlighter, f);
+    /// Decode a syntax from a loaded source.
+    #[comemo::memoize]
+    #[typst_macros::time(name = "load syntaxes")]
+    fn decode(source: &DataSource, data: &Bytes) -> StrResult<RawSyntax> {
+        let src = data.as_str().map_err(FileError::from)?;
+        let syntax = SyntaxDefinition::load_from_str(src, false, None).map_err(
+            |err| match source {
+                DataSource::Path(path) => {
+                    eco_format!("failed to parse syntax file `{path}` ({err})")
+                }
+                DataSource::Bytes(_) => {
+                    eco_format!("failed to parse syntax ({err})")
+                }
+            },
+        )?;
+
+        let mut builder = SyntaxSetBuilder::new();
+        builder.add(syntax);
+
+        Ok(RawSyntax(Arc::new(ManuallyHash::new(
+            builder.build(),
+            typst_utils::hash128(data),
+        ))))
     }
+
+    /// Return the underlying syntax set.
+    fn get(&self) -> &SyntaxSet {
+        self.0.as_ref()
+    }
+}
+
+/// A loaded syntect theme.
+#[derive(Debug, Clone, PartialEq, Hash)]
+pub struct RawTheme(Arc<ManuallyHash<synt::Theme>>);
+
+impl RawTheme {
+    /// Load a theme from a data source.
+    fn load(
+        world: Tracked<dyn World + '_>,
+        source: Spanned<DataSource>,
+    ) -> SourceResult<Derived<DataSource, Self>> {
+        let data = source.load(world)?;
+        let theme = Self::decode(&data).at(source.span)?;
+        Ok(Derived::new(source.v, theme))
+    }
+
+    /// Decode a theme from bytes.
+    #[comemo::memoize]
+    fn decode(data: &Bytes) -> StrResult<RawTheme> {
+        let mut cursor = std::io::Cursor::new(data.as_slice());
+        let theme = synt::ThemeSet::load_from_reader(&mut cursor)
+            .map_err(|err| eco_format!("failed to parse theme ({err})"))?;
+        Ok(RawTheme(Arc::new(ManuallyHash::new(theme, typst_utils::hash128(data)))))
+    }
+
+    /// Get the underlying syntect theme.
+    pub fn get(&self) -> &synt::Theme {
+        self.0.as_ref()
+    }
+}
+
+/// A highlighted line of raw text.
+///
+/// This is a helper element that is synthesized by [`raw`] elements.
+///
+/// It allows you to access various properties of the line, such as the line
+/// number, the raw non-highlighted text, the highlighted text, and whether it
+/// is the first or last line of the raw block.
+#[elem(name = "line", title = "Raw Text / Code Line", Show, PlainText)]
+pub struct RawLine {
+    /// The line number of the raw line inside of the raw block, starts at 1.
+    #[required]
+    pub number: i64,
+
+    /// The total number of lines in the raw block.
+    #[required]
+    pub count: i64,
+
+    /// The line of raw text.
+    #[required]
+    pub text: EcoString,
+
+    /// The highlighted raw text.
+    #[required]
+    pub body: Content,
+}
+
+impl Show for Packed<RawLine> {
+    #[typst_macros::time(name = "raw.line", span = self.span())]
+    fn show(&self, _: &mut Engine, _styles: StyleChain) -> SourceResult<Content> {
+        Ok(self.body.clone())
+    }
+}
+
+impl PlainText for Packed<RawLine> {
+    fn plain_text(&self, text: &mut EcoString) {
+        text.push_str(&self.text);
+    }
+}
+
+/// Wrapper struct for the state required to highlight typst code.
+struct ThemedHighlighter<'a> {
+    /// The code being highlighted.
+    code: &'a str,
+    /// The current node being highlighted.
+    node: LinkedNode<'a>,
+    /// The highlighter.
+    highlighter: synt::Highlighter<'a>,
+    /// The current scopes.
+    scopes: Vec<syntect::parsing::Scope>,
+    /// The current highlighted line.
+    current_line: Vec<Content>,
+    /// The range of the current line.
+    range: Range<usize>,
+    /// The current line number.
+    line: usize,
+    /// The function to style a piece of text.
+    style_fn: StyleFn<'a>,
+    /// The function to append a line.
+    line_fn: LineFn<'a>,
+}
+
+// Shorthands for highlighter closures.
+type StyleFn<'a> =
+    &'a mut dyn FnMut(usize, &LinkedNode, Range<usize>, synt::Style) -> Content;
+type LineFn<'a> = &'a mut dyn FnMut(usize, Range<usize>, &mut Vec<Content>);
+
+impl<'a> ThemedHighlighter<'a> {
+    pub fn new(
+        code: &'a str,
+        top: LinkedNode<'a>,
+        highlighter: synt::Highlighter<'a>,
+        style_fn: StyleFn<'a>,
+        line_fn: LineFn<'a>,
+    ) -> Self {
+        Self {
+            code,
+            node: top,
+            highlighter,
+            range: 0..0,
+            scopes: Vec::new(),
+            current_line: Vec::new(),
+            line: 0,
+            style_fn,
+            line_fn,
+        }
+    }
+
+    pub fn highlight(&mut self) {
+        self.highlight_inner();
+
+        if !self.current_line.is_empty() {
+            (self.line_fn)(
+                self.line,
+                self.range.start..self.code.len(),
+                &mut self.current_line,
+            );
+
+            self.current_line.clear();
+        }
+    }
+
+    fn highlight_inner(&mut self) {
+        if self.node.children().len() == 0 {
+            let style = self.highlighter.style_for_stack(&self.scopes);
+            let segment = &self.code[self.node.range()];
+
+            let mut len = 0;
+            for (i, line) in split_newlines(segment).into_iter().enumerate() {
+                if i != 0 {
+                    (self.line_fn)(
+                        self.line,
+                        self.range.start..self.range.end + len - 1,
+                        &mut self.current_line,
+                    );
+                    self.range.start = self.range.end + len;
+                    self.line += 1;
+                }
+
+                let offset = self.node.range().start + len;
+                let token_range = offset..(offset + line.len());
+                self.current_line.push((self.style_fn)(
+                    self.line,
+                    &self.node,
+                    token_range,
+                    style,
+                ));
+
+                len += line.len() + 1;
+            }
+
+            self.range.end += segment.len();
+        }
+
+        for child in self.node.children() {
+            let mut scopes = self.scopes.clone();
+            if let Some(tag) = typst_syntax::highlight(&child) {
+                scopes.push(syntect::parsing::Scope::new(tag.tm_scope()).unwrap())
+            }
+
+            std::mem::swap(&mut scopes, &mut self.scopes);
+            self.node = child;
+            self.highlight_inner();
+            std::mem::swap(&mut scopes, &mut self.scopes);
+        }
+    }
+}
+
+fn preprocess(
+    text: &RawContent,
+    styles: StyleChain,
+    span: Span,
+) -> EcoVec<(EcoString, Span)> {
+    if let RawContent::Lines(lines) = text {
+        if lines.iter().all(|(s, _)| !s.contains('\t')) {
+            return lines.clone();
+        }
+    }
+
+    let mut text = text.get();
+    if text.contains('\t') {
+        let tab_size = RawElem::tab_size_in(styles);
+        text = align_tabs(&text, tab_size);
+    }
+    split_newlines(&text)
+        .into_iter()
+        .map(|line| (line.into(), span))
+        .collect()
 }
 
 /// Style a piece of text with a syntect style.
-fn styled(piece: &str, foreground: Paint, style: synt::Style) -> Content {
-    let mut body = TextElem::packed(piece);
+fn styled(
+    piece: &str,
+    foreground: synt::Color,
+    style: synt::Style,
+    span: Span,
+    span_offset: usize,
+) -> Content {
+    let mut body = TextElem::packed(piece).spanned(span);
 
-    let paint = to_typst(style.foreground).into();
-    if paint != foreground {
-        body = body.styled(TextElem::set_fill(paint));
+    if span_offset > 0 {
+        body = body.styled(TextElem::set_span_offset(span_offset));
+    }
+
+    if style.foreground != foreground {
+        body = body.styled(TextElem::set_fill(to_typst(style.foreground).into()));
     }
 
     if style.font_style.contains(synt::FontStyle::BOLD) {
-        body = body.strong();
+        body = body.strong().spanned(span);
     }
 
     if style.font_style.contains(synt::FontStyle::ITALIC) {
-        body = body.emph();
+        body = body.emph().spanned(span);
     }
 
     if style.font_style.contains(synt::FontStyle::UNDERLINE) {
-        body = body.underlined();
+        body = body.underlined().spanned(span);
     }
 
     body
 }
 
-fn to_typst(synt::Color { r, g, b, a }: synt::Color) -> RgbaColor {
-    RgbaColor { r, g, b, a }
+fn to_typst(synt::Color { r, g, b, a }: synt::Color) -> Color {
+    Color::from_u8(r, g, b, a)
 }
 
-fn to_syn(RgbaColor { r, g, b, a }: RgbaColor) -> synt::Color {
+fn to_syn(color: Color) -> synt::Color {
+    let [r, g, b, a] = color.to_rgb().to_vec4_u8();
     synt::Color { r, g, b, a }
 }
 
-/// A list of bibliography file paths.
-#[derive(Debug, Default, Clone, Hash)]
-pub struct SyntaxPaths(Vec<EcoString>);
-
-cast! {
-    SyntaxPaths,
-    self => self.0.into_value(),
-    v: EcoString => Self(vec![v]),
-    v: Array => Self(v.into_iter().map(Value::cast).collect::<StrResult<_>>()?),
-}
-
-impl Fold for SyntaxPaths {
-    type Output = Self;
-
-    fn fold(mut self, outer: Self::Output) -> Self::Output {
-        self.0.extend(outer.0);
-        self
+/// Create a syntect theme item.
+fn item(
+    scope: &str,
+    color: Option<&str>,
+    font_style: Option<synt::FontStyle>,
+) -> synt::ThemeItem {
+    synt::ThemeItem {
+        scope: scope.parse().unwrap(),
+        style: synt::StyleModifier {
+            foreground: color.map(|s| to_syn(s.parse::<Color>().unwrap())),
+            background: None,
+            font_style,
+        },
     }
 }
 
-/// Load a syntax set from a list of syntax file paths.
-#[comemo::memoize]
-fn load_syntaxes(paths: &SyntaxPaths, bytes: &[Bytes]) -> StrResult<Arc<SyntaxSet>> {
-    let mut out = SyntaxSetBuilder::new();
+/// Replace tabs with spaces to align with multiples of `tab_size`.
+fn align_tabs(text: &str, tab_size: usize) -> EcoString {
+    let replacement = " ".repeat(tab_size);
+    let divisor = tab_size.max(1);
+    let amount = text.chars().filter(|&c| c == '\t').count();
 
-    // We might have multiple sublime-syntax/yaml files
-    for (path, bytes) in paths.0.iter().zip(bytes.iter()) {
-        let src = std::str::from_utf8(bytes).map_err(|_| FileError::InvalidUtf8)?;
-        out.add(
-            SyntaxDefinition::load_from_str(src, false, None)
-                .map_err(|e| eco_format!("failed to parse syntax file `{path}`: {e}"))?,
-        );
+    let mut res = EcoString::with_capacity(text.len() - amount + amount * tab_size);
+    let mut column = 0;
+
+    for grapheme in text.graphemes(true) {
+        match grapheme {
+            "\t" => {
+                let required = tab_size - column % divisor;
+                res.push_str(&replacement[..required]);
+                column += required;
+            }
+            "\n" => {
+                res.push_str(grapheme);
+                column = 0;
+            }
+            _ => {
+                res.push_str(grapheme);
+                column += 1;
+            }
+        }
     }
 
-    Ok(Arc::new(out.build()))
-}
-
-/// Function to parse the syntaxes argument.
-/// Much nicer than having it be part of the `element` macro.
-fn parse_syntaxes(
-    vm: &mut Vm,
-    args: &mut Args,
-) -> SourceResult<(Option<SyntaxPaths>, Option<Vec<Bytes>>)> {
-    let Some(Spanned { v: paths, span }) =
-        args.named::<Spanned<SyntaxPaths>>("syntaxes")?
-    else {
-        return Ok((None, None));
-    };
-
-    // Load syntax files.
-    let data = paths
-        .0
-        .iter()
-        .map(|path| {
-            let id = vm.location().join(path).at(span)?;
-            vm.world().file(id).at(span)
-        })
-        .collect::<SourceResult<Vec<Bytes>>>()?;
-
-    // Check that parsing works.
-    let _ = load_syntaxes(&paths, &data).at(span)?;
-
-    Ok((Some(paths), Some(data)))
-}
-
-#[comemo::memoize]
-fn load_theme(path: EcoString, bytes: Bytes) -> StrResult<Arc<synt::Theme>> {
-    let mut cursor = std::io::Cursor::new(bytes.as_slice());
-
-    synt::ThemeSet::load_from_reader(&mut cursor)
-        .map(Arc::new)
-        .map_err(|e| eco_format!("failed to parse theme file `{path}`: {e}"))
-}
-
-/// Function to parse the theme argument.
-/// Much nicer than having it be part of the `element` macro.
-fn parse_theme(
-    vm: &mut Vm,
-    args: &mut Args,
-) -> SourceResult<(Option<EcoString>, Option<Bytes>)> {
-    let Some(Spanned { v: path, span }) =
-        args.named::<Spanned<EcoString>>("theme")?
-    else {
-        return Ok((None, None));
-    };
-
-    // Load theme file.
-    let id = vm.location().join(&path).at(span)?;
-    let data = vm.world().file(id).at(span)?;
-
-    // Check that parsing works.
-    let _ = load_theme(path.clone(), data.clone()).at(span)?;
-
-    Ok((Some(path), Some(data)))
+    res
 }
 
 /// The syntect syntax definitions.
 ///
-/// Code for syntax set generation is below. The `syntaxes` directory is from
+/// Syntax set is generated from the syntaxes from the `bat` project
 /// <https://github.com/sharkdp/bat/tree/master/assets/syntaxes>
-///
-/// ```ignore
-/// fn main() {
-///     let mut builder = syntect::parsing::SyntaxSet::load_defaults_nonewlines().into_builder();
-///     builder.add_from_folder("syntaxes/02_Extra", false).unwrap();
-///     syntect::dumps::dump_to_file(&builder.build(), "syntect.bin").unwrap();
-/// }
-/// ```
-///
-/// The following syntaxes are disabled due to compatibility issues:
-/// ```text
-/// syntaxes/02_Extra/Assembly (ARM).sublime-syntax
-/// syntaxes/02_Extra/Elixir/Regular Expressions (Elixir).sublime-syntax
-/// syntaxes/02_Extra/JavaScript (Babel).sublime-syntax
-/// syntaxes/02_Extra/LiveScript.sublime-syntax
-/// syntaxes/02_Extra/PowerShell.sublime-syntax
-/// syntaxes/02_Extra/SCSS_Sass/Syntaxes/Sass.sublime-syntax
-/// syntaxes/02_Extra/SLS/SLS.sublime-syntax
-/// syntaxes/02_Extra/VimHelp.sublime-syntax
-/// syntaxes/02_Extra/cmd-help/syntaxes/cmd-help.sublime-syntax
-/// ```
-pub static SYNTAXES: Lazy<syntect::parsing::SyntaxSet> =
-    Lazy::new(|| syntect::dumps::from_binary(include_bytes!("../../assets/syntect.bin")));
+pub static RAW_SYNTAXES: LazyLock<syntect::parsing::SyntaxSet> =
+    LazyLock::new(two_face::syntax::extra_no_newlines);
 
 /// The default theme used for syntax highlighting.
-pub static THEME: Lazy<synt::Theme> = Lazy::new(|| synt::Theme {
+pub static RAW_THEME: LazyLock<synt::Theme> = LazyLock::new(|| synt::Theme {
     name: Some("Typst Light".into()),
     author: Some("The Typst Project Developers".into()),
     settings: synt::ThemeSettings::default(),
@@ -553,21 +906,8 @@ pub static THEME: Lazy<synt::Theme> = Lazy::new(|| synt::Theme {
         item("support.macro", Some("#16718d"), None),
         item("meta.annotation", Some("#301414"), None),
         item("entity.other, meta.interpolation", Some("#8b41b1"), None),
+        item("meta.diff.range", Some("#8b41b1"), None),
+        item("markup.inserted, meta.diff.header.to-file", Some("#298e0d"), None),
+        item("markup.deleted, meta.diff.header.from-file", Some("#d73a49"), None),
     ],
 });
-
-/// Create a syntect theme item.
-fn item(
-    scope: &str,
-    color: Option<&str>,
-    font_style: Option<synt::FontStyle>,
-) -> synt::ThemeItem {
-    synt::ThemeItem {
-        scope: scope.parse().unwrap(),
-        style: synt::StyleModifier {
-            foreground: color.map(|s| to_syn(s.parse::<RgbaColor>().unwrap())),
-            background: None,
-            font_style,
-        },
-    }
-}

@@ -10,11 +10,11 @@ base a conference paper on it! The report will of course have to comply with the
 conference's style guide. Let's see how we can achieve that.
 
 Before we start, let's create a team, invite your supervisor and add them to the
-team. You can do this by going back to the app dashboard with the four-circles
-icon in the top left corner of the editor. Then, choose the plus icon in the
-left toolbar and create a team. Finally, click on the new team and go to its
-settings by clicking 'manage team' next to the team name. Now you can invite
-your supervisor by email.
+team. You can do this by going back to the app dashboard with the back icon in
+the top left corner of the editor. Then, choose the plus icon in the left
+toolbar and create a team. Finally, click on the new team and go to its settings
+by clicking 'manage team' next to the team name. Now you can invite your
+supervisor by email.
 
 ![The team settings](3-advanced-team-settings.png)
 
@@ -24,7 +24,7 @@ owners dropdown. Don't forget to save your changes!
 
 Now, your supervisor can also edit the project and you can both see the changes
 in real time. You can join our [Discord server](https://discord.gg/2uDybryKPe)
-to find others with preview access and try teams with them!
+to find other users and try teams with them!
 
 ## The conference guidelines { #guidelines }
 The layout guidelines are available on the conference website. Let's take a look
@@ -40,7 +40,7 @@ at them:
 - Second level headings are run-ins, italicized and have the same size as the
   body text
 - Finally, the pages should be US letter sized, numbered in the center of the
-  footer and the top left corner of each page should contain the title of the
+  footer and the top right corner of each page should contain the title of the
   paper
 
 We already know how to do many of these things, but for some of them, we'll need
@@ -61,7 +61,7 @@ Let's start by writing some set rules for the document.
 )
 #set par(justify: true)
 #set text(
-  font: "Linux Libertine",
+  font: "Libertinus Serif",
   size: 11pt,
 )
 
@@ -69,7 +69,7 @@ Let's start by writing some set rules for the document.
 ```
 
 You are already familiar with most of what is going on here. We set the text
-size to `{11pt}` and the font to Linux Libertine. We also enable paragraph
+size to `{11pt}` and the font to Libertinus Serif. We also enable paragraph
 justification and set the page size to US letter.
 
 The `header` argument is new: With it, we can provide content to fill the top
@@ -78,7 +78,7 @@ by the conference style guide. We use the `align` function to align the text to
 the right.
 
 Last but not least is the `numbering` argument. Here, we can provide a
-[numbering pattern]($func/numbering) that defines how to number the pages. By
+[numbering pattern]($numbering) that defines how to number the pages. By
 setting into to `{"1"}`, Typst only displays the bare page number. Setting it to
 `{"(1/1)"}` would have displayed the current page and total number of pages
 surrounded by parentheses. And we could even have provided a completely custom
@@ -90,7 +90,7 @@ align it and increase its font weight by enclosing it in `[*stars*]`.
 
 ```example
 >>> #set page(width: 300pt, margin: 30pt)
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 #align(center, text(17pt)[
   *A fluid dynamic model
   for glacier flow*
@@ -104,7 +104,7 @@ supervisor, we'll add our own and their name.
 
 ```example
 >>> #set page(width: 300pt, margin: 30pt)
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 >>>
 >>> #align(center, text(17pt)[
 >>>   *A fluid dynamic model
@@ -125,23 +125,23 @@ supervisor, we'll add our own and their name.
 )
 ```
 
-The two author blocks are laid out next to each other. We use the
-[`grid`]($func/grid) function to create this layout. With a grid, we can control
-exactly how large each column is and which content goes into which cell. The
-`columns` argument takes an array of [relative lengths]($type/relative-length)
-or [fractions]($type/fraction). In this case, we passed it two equal fractional
-sizes, telling it to split the available space into two equal columns. We then
-passed two content arguments to the grid function. The first with our own
-details, and the second with our supervisors'. We again use the `align` function
-to center the content within the column. The grid takes an arbitrary number of
-content arguments specifying the cells. Rows are added automatically, but they
-can also be manually sized with the `rows` argument.
+The two author blocks are laid out next to each other. We use the [`grid`]
+function to create this layout. With a grid, we can control exactly how large
+each column is and which content goes into which cell. The `columns` argument
+takes an array of [relative lengths]($relative) or [fractions]($fraction). In
+this case, we passed it two equal fractional sizes, telling it to split the
+available space into two equal columns. We then passed two content arguments to
+the grid function. The first with our own details, and the second with our
+supervisors'. We again use the `align` function to center the content within the
+column. The grid takes an arbitrary number of content arguments specifying the
+cells. Rows are added automatically, but they can also be manually sized with
+the `rows` argument.
 
 Now, let's add the abstract. Remember that the conference wants the abstract to
 be set ragged and centered.
 
 ```example:0,0,612,317.5
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 >>> #set par(justify: true)
 >>> #set page(
 >>>   "us-letter",
@@ -200,7 +200,7 @@ keyword:
 
 <<< ...
 
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 >>> #set par(justify: true)
 #set page(
 >>>   "us-letter",
@@ -248,18 +248,34 @@ on another title, we can easily change it in one place.
 
 ## Adding columns and headings { #columns-and-headings }
 The paper above unfortunately looks like a wall of lead. To fix that, let's add
-some headings and switch our paper to a two-column layout. The
-[`columns`]($func/columns) function takes a number and content, and layouts the
-content into the specified number of columns. Since we want everything after the
-abstract to be in two columns, we need to apply the column function to our whole
-document.
+some headings and switch our paper to a two-column layout. Fortunately, that's
+easy to do: We just need to amend our `page` set rule with the `columns`
+argument.
 
-Instead of wrapping the whole document in a giant function call, we can use an
-"everything" show rule. To write such a show rule, put a colon directly behind
-the show keyword and then provide a function. This function is given the rest of
-the document as a parameter. We have called the parameter `rest` here, but you
-are free to choose any name. The function can then do anything with this
-content. In our case, it passes it on to the `columns` function.
+By adding `{columns: 2}` to the argument list, we have wrapped the whole
+document in two columns. However, that would also affect the title and authors
+overview. To keep them spanning the whole page, we can wrap them in a function
+call to [`{place}`]($place). Place expects an alignment and the content it
+should place as positional arguments. Using the named `{scope}` argument, we can
+decide if the items should be placed relative to the current column or its
+parent (the page). There is one more thing to configure: If no other arguments
+are provided, `{place}` takes its content out of the flow of the document and
+positions it over the other content without affecting the layout of other
+content in its container:
+
+```example
+#place(
+  top + center,
+  rect(fill: black),
+)
+#lorem(30)
+```
+
+If we hadn't used `{place}` here, the square would be in its own line, but here
+it overlaps the few lines of text following it. Likewise, that text acts like as
+if there was no square. To change this behavior, we can pass the argument
+`{float: true}` to ensure that the space taken up by the placed item at the top
+or bottom of the page is not occupied by any other content.
 
 ```example:single
 >>> #let title = [
@@ -267,47 +283,52 @@ content. In our case, it passes it on to the `columns` function.
 >>>   for glacier flow
 >>> ]
 >>>
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 >>> #set par(justify: true)
->>> #set page(
->>>   "us-letter",
->>>   margin: auto,
->>>   header: align(
->>>     right + horizon,
->>>     title
->>>   ),
->>>   numbering: "1",
->>> )
 >>>
->>> #align(center, text(
->>>   17pt,
->>>   weight: "bold",
->>>   title,
->>> ))
->>>
->>> #grid(
->>>   columns: (1fr, 1fr),
->>>   align(center)[
->>>     Therese Tungsten \
->>>     Artos Institute \
->>>     #link("mailto:tung@artos.edu")
->>>   ],
->>>   align(center)[
->>>     Dr. John Doe \
->>>     Artos Institute \
->>>     #link("mailto:doe@artos.edu")
->>>   ]
->>> )
->>>
->>> #align(center)[
->>>   #set par(justify: false)
->>>   *Abstract* \
->>>   #lorem(80)
->>> ]
->>> #v(4mm)
-<<< ...
+#set page(
+>>> margin: auto,
+  paper: "us-letter",
+  header: align(
+    right + horizon,
+    title
+  ),
+  numbering: "1",
+  columns: 2,
+)
 
-#show: rest => columns(2, rest)
+#place(
+  top + center,
+  float: true,
+  scope: "parent",
+  clearance: 2em,
+)[
+>>>  #text(
+>>>    17pt,
+>>>    weight: "bold",
+>>>    title,
+>>>  )
+>>>
+>>>  #grid(
+>>>    columns: (1fr, 1fr),
+>>>    [
+>>>      Therese Tungsten \
+>>>      Artos Institute \
+>>>      #link("mailto:tung@artos.edu")
+>>>    ],
+>>>    [
+>>>      Dr. John Doe \
+>>>      Artos Institute \
+>>>      #link("mailto:doe@artos.edu")
+>>>    ]
+>>>  )
+<<<   ...
+
+  #par(justify: false)[
+    *Abstract* \
+    #lorem(80)
+  ]
+]
 
 = Introduction
 #lorem(300)
@@ -315,6 +336,11 @@ content. In our case, it passes it on to the `columns` function.
 = Related Work
 #lorem(200)
 ```
+
+In this example, we also used the `clearance` argument of the `{place}` function
+to provide the space between it and the body instead of using the [`{v}`]($v)
+function. We can also remove the explicit `{align(center, ..)}` calls around the
+various parts since they inherit the center alignment from the placement.
 
 Now there is only one thing left to do: Style our headings. We need to make them
 centered and use small capitals. Because the `heading` function does not offer
@@ -326,7 +352,7 @@ a way to set any of that, we need to write our own heading show rule.
 >>>   for glacier flow
 >>> ]
 >>>
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 >>> #set par(justify: true)
 >>> #set page(
 >>>   "us-letter",
@@ -336,43 +362,47 @@ a way to set any of that, we need to write our own heading show rule.
 >>>     title
 >>>   ),
 >>>   numbering: "1",
+>>>   columns: 2,
 >>> )
 #show heading: it => [
   #set align(center)
-  #set text(12pt, weight: "regular")
+  #set text(13pt, weight: "regular")
   #block(smallcaps(it.body))
 ]
 
 <<< ...
 >>>
->>> #align(center, text(
->>>   17pt,
->>>   weight: "bold",
->>>   title,
->>> ))
+>>> #place(
+>>>   top + center,
+>>>   float: true,
+>>>   scope: "parent",
+>>>   clearance: 2em,
+>>> )[
+>>>   #text(
+>>>     17pt,
+>>>     weight: "bold",
+>>>     title,
+>>>   )
 >>>
->>> #grid(
->>>   columns: (1fr, 1fr),
->>>   align(center)[
->>>     Therese Tungsten \
->>>     Artos Institute \
->>>     #link("mailto:tung@artos.edu")
->>>   ],
->>>   align(center)[
->>>     Dr. John Doe \
->>>     Artos Institute \
->>>     #link("mailto:doe@artos.edu")
+>>>   #grid(
+>>>     columns: (1fr, 1fr),
+>>>     [
+>>>       Therese Tungsten \
+>>>       Artos Institute \
+>>>       #link("mailto:tung@artos.edu")
+>>>     ],
+>>>     [
+>>>       Dr. John Doe \
+>>>       Artos Institute \
+>>>       #link("mailto:doe@artos.edu")
+>>>     ]
+>>>   )
+>>>
+>>>   #par(justify: false)[
+>>>     *Abstract* \
+>>>     #lorem(80)
 >>>   ]
->>> )
->>>
->>> #align(center)[
->>>   #set par(justify: false)
->>>   *Abstract* \
->>>   #lorem(80)
 >>> ]
->>>
->>> #v(4mm)
->>> #show: rest => columns(2, rest)
 >>>
 >>> = Introduction
 >>> #lorem(35)
@@ -386,7 +416,7 @@ function that gets passed the heading as a parameter. That parameter can be used
 as content but it also has some fields like `title`, `numbers`, and `level` from
 which we can compose a custom look. Here, we are center-aligning, setting the
 font weight to `{"regular"}` because headings are bold by default, and use the
-[`smallcaps`]($func/smallcaps) function to render the heading's title in small capitals.
+[`smallcaps`] function to render the heading's title in small capitals.
 
 The only remaining problem is that all headings look the same now. The
 "Motivation" and "Problem Statement" subsections ought to be italic run in
@@ -402,7 +432,7 @@ differentiate between section and subsection headings:
 >>>   for glacier flow
 >>> ]
 >>>
->>> #set text(font: "Linux Libertine", 11pt)
+>>> #set text(font: "Libertinus Serif", 11pt)
 >>> #set par(justify: true)
 >>> #set page(
 >>>   "us-letter",
@@ -412,13 +442,14 @@ differentiate between section and subsection headings:
 >>>     title
 >>>   ),
 >>>   numbering: "1",
+>>>   columns: 2,
 >>> )
 >>>
 #show heading.where(
   level: 1
 ): it => block(width: 100%)[
   #set align(center)
-  #set text(12pt, weight: "regular")
+  #set text(13pt, weight: "regular")
   #smallcaps(it.body)
 ]
 
@@ -431,34 +462,37 @@ differentiate between section and subsection headings:
   it.body + [.],
 )
 >>>
->>> #align(center, text(
->>>   17pt,
->>>   weight: "bold",
->>>   title,
->>> ))
+>>> #place(
+>>>   top + center,
+>>>   float: true,
+>>>   scope: "parent",
+>>>   clearance: 2em,
+>>> )[
+>>>   #text(
+>>>     17pt,
+>>>     weight: "bold",
+>>>     title,
+>>>   )
 >>>
->>> #grid(
->>>   columns: (1fr, 1fr),
->>>   align(center)[
->>>     Therese Tungsten \
->>>     Artos Institute \
->>>     #link("mailto:tung@artos.edu")
->>>   ],
->>>   align(center)[
->>>     Dr. John Doe \
->>>     Artos Institute \
->>>     #link("mailto:doe@artos.edu")
+>>>  #grid(
+>>>    columns: (1fr, 1fr),
+>>>    [
+>>>      Therese Tungsten \
+>>>      Artos Institute \
+>>>      #link("mailto:tung@artos.edu")
+>>>    ],
+>>>    [
+>>>      Dr. John Doe \
+>>>      Artos Institute \
+>>>      #link("mailto:doe@artos.edu")
+>>>    ]
+>>>  )
+>>>
+>>>   #par(justify: false)[
+>>>     *Abstract* \
+>>>     #lorem(80)
 >>>   ]
->>> )
->>>
->>> #align(center)[
->>>   #set par(justify: false)
->>>   *Abstract* \
->>>   #lorem(80)
 >>> ]
->>>
->>> #v(4mm)
->>> #show: rest => columns(2, rest)
 >>>
 >>> = Introduction
 >>> #lorem(35)
@@ -478,11 +512,12 @@ Let's review the conference's style guide:
 - The paper contains a single-column abstract and two-column main text ✓
 - The abstract should be centered ✓
 - The main text should be justified ✓
-- First level section headings should be centered, rendered in small caps and in 13pt ✓
+- First level section headings should be centered, rendered in small caps and in
+  13pt ✓
 - Second level headings are run-ins, italicized and have the same size as the
   body text ✓
 - Finally, the pages should be US letter sized, numbered in the center and the
-  top left corner of each page should contain the title of the paper ✓
+  top right corner of each page should contain the title of the paper ✓
 
 We are now in compliance with all of these styles and can submit the paper to
 the conference! The finished paper looks like this:
@@ -493,9 +528,11 @@ the conference! The finished paper looks like this:
   style="box-shadow: 0 4px 12px rgb(89 85 101 / 20%); width: 500px; max-width: 100%; display: block; margin: 24px auto;"
 >
 
-## Review { #review }
+## Review
 You have now learned how to create headers and footers, how to use functions and
-scopes to locally override styles, how to create more complex layouts with the [`grid`]($func/grid) function and how to write show rules for individual functions, and the whole document. You also learned how to use the
+scopes to locally override styles, how to create more complex layouts with the
+[`grid`] function and how to write show rules for individual functions, and the
+whole document. You also learned how to use the
 [`where` selector]($styling/#show-rules) to filter the headings by their level.
 
 The paper was a great success! You've met a lot of like-minded researchers at
