@@ -3,8 +3,9 @@
 
 name: Build Release Binaries
 on:
+  workflow_dispatch:
   release:
-    types: [created]
+    types: [published]
 
 jobs:
   build-release:
@@ -25,6 +26,9 @@ jobs:
         - target: armv7-unknown-linux-musleabi
           os: ubuntu-latest
           cross: true
+        - target: riscv64gc-unknown-linux-gnu
+          os: ubuntu-latest
+          cross: true
         - target: x86_64-apple-darwin
           os: macos-latest
           cross: false
@@ -34,22 +38,25 @@ jobs:
         - target: x86_64-pc-windows-msvc
           os: windows-latest
           cross: false
+        - target: aarch64-pc-windows-msvc
+          os: windows-latest
+          cross: false
 
     steps:
-    - uses: actions/checkout@v3
-    - uses: dtolnay/rust-toolchain@stable
+    - uses: actions/checkout@v4
+    - uses: dtolnay/rust-toolchain@1.83.0
       with:
         target: ${{ matrix.target }}
 
     - name: Run Cross
-      if: ${{ matrix.cross}}
+      if: ${{ matrix.cross }}
       run: |
-        cargo install cross --git https://github.com/cross-rs/cross.git
-        cross build -p typst-cli --release --target ${{ matrix.target }}
+        cargo install cross --git https://github.com/cross-rs/cross.git --locked --rev 085092ca
+        cross build -p typst-cli --release --target ${{ matrix.target }} --features self-update,vendor-openssl
 
     - name: Run Cargo
       if: ${{ !matrix.cross }}
-      run: cargo build -p typst-cli --release --target ${{ matrix.target }}
+      run: cargo build -p typst-cli --release --target ${{ matrix.target }} --features self-update
 
     - name: create artifact directory
       shell: bash
@@ -65,7 +72,17 @@ jobs:
           tar cJf $directory.tar.xz $directory
         fi
 
-    - uses: ncipollo/release-action@v1
+    - uses: actions/upload-artifact@v4
+      if: github.event_name == 'workflow_dispatch'
+      with:
+        name: typst-${{ matrix.target }}
+        path: "typst-${{ matrix.target }}.*"
+        retention-days: 3
+
+    - uses: ncipollo/release-action@v1.14.0
+      if: github.event_name == 'release'
       with:
         artifacts: "typst-${{ matrix.target }}.*"
         allowUpdates: true
+        omitNameDuringUpdate: true
+        omitBodyDuringUpdate: true

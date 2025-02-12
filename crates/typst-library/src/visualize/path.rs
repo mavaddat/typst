@@ -1,13 +1,16 @@
-use kurbo::{CubicBez, ParamCurveExtrema};
-use typst::eval::Reflect;
+use self::PathVertex::{AllControlPoints, MirroredControlPoint, Vertex};
+use crate::diag::{bail, SourceResult};
+use crate::engine::Engine;
+use crate::foundations::{
+    array, cast, elem, Array, Content, NativeElement, Packed, Reflect, Show, Smart,
+    StyleChain,
+};
+use crate::layout::{Axes, BlockElem, Length, Rel};
+use crate::visualize::{FillRule, Paint, Stroke};
 
-use crate::prelude::*;
-
-use PathVertex::{AllControlPoints, MirroredControlPoint, Vertex};
-
-/// A path through a list of points, connected by Bezier curves.
+/// A path through a list of points, connected by Bézier curves.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// #path(
 ///   fill: blue.lighten(80%),
@@ -18,29 +21,46 @@ use PathVertex::{AllControlPoints, MirroredControlPoint, Vertex};
 ///   ((50%, 0pt), (40pt, 0pt)),
 /// )
 /// ```
-///
-/// Display: Path
-/// Category: visualize
-#[element(Layout)]
+#[elem(Show)]
 pub struct PathElem {
-    /// How to fill the path. See the
-    /// [rectangle's documentation]($func/rect.fill) for more details.
+    /// How to fill the path.
     ///
-    /// Currently all paths are filled according to the
-    /// [non-zero winding rule](https://en.wikipedia.org/wiki/Nonzero-rule).
+    /// When setting a fill, the default stroke disappears. To create a
+    /// rectangle with both fill and stroke, you have to configure both.
     pub fill: Option<Paint>,
 
-    /// How to stroke the path. This can be:
+    /// The drawing rule used to fill the path.
     ///
-    /// See the [line's documentation]($func/line.stroke) for more details. Can
-    /// be set to  `{none}` to disable the stroke or to `{auto}` for a stroke of
-    /// `{1pt}` black if and if only if no fill is given.
+    /// ```example
+    /// // We use `.with` to get a new
+    /// // function that has the common
+    /// // arguments pre-applied.
+    /// #let star = path.with(
+    ///   fill: red,
+    ///   closed: true,
+    ///   (25pt, 0pt),
+    ///   (10pt, 50pt),
+    ///   (50pt, 20pt),
+    ///   (0pt, 20pt),
+    ///   (40pt, 50pt),
+    /// )
+    ///
+    /// #star(fill-rule: "non-zero")
+    /// #star(fill-rule: "even-odd")
+    /// ```
+    #[default]
+    pub fill_rule: FillRule,
+
+    /// How to [stroke] the path. This can be:
+    ///
+    /// Can be set to  `{none}` to disable the stroke or to `{auto}` for a
+    /// stroke of `{1pt}` black if and if only if no fill is given.
     #[resolve]
     #[fold]
-    pub stroke: Smart<Option<PartialStroke>>,
+    pub stroke: Smart<Option<Stroke>>,
 
-    /// Whether to close this path with one last bezier curve. This curve will
-    /// takes into account the adjacent control points. If you want to close
+    /// Whether to close this path with one last Bézier curve. This curve will
+    /// take into account the adjacent control points. If you want to close
     /// with a straight line, simply add one last point that's the same as the
     /// start point.
     #[default(false)]
@@ -50,8 +70,7 @@ pub struct PathElem {
     ///
     /// Each vertex can be defined in 3 ways:
     ///
-    /// - A regular point, as given to the [`line`]($func/line) or
-    ///   [`polygon`]($func/polygon) function.
+    /// - A regular point, as given to the [`line`] or [`polygon`] function.
     /// - An array of two points, the first being the vertex and the second
     ///   being the control point. The control point is expressed relative to
     ///   the vertex and is mirrored to get the second control point. The given
@@ -60,95 +79,20 @@ pub struct PathElem {
     ///   the curve going out of this vertex.
     /// - An array of three points, the first being the vertex and the next
     ///   being the control points (control point for curves coming in and out,
-    ///   respectively)
+    ///   respectively).
     #[variadic]
     pub vertices: Vec<PathVertex>,
 }
 
-impl Layout for PathElem {
-    #[tracing::instrument(name = "PathElem::layout", skip_all)]
-    fn layout(
-        &self,
-        _: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        let resolve = |axes: Axes<Rel<Length>>| {
-            axes.resolve(styles)
-                .zip(regions.base())
-                .map(|(l, b)| l.relative_to(b))
-                .to_point()
-        };
-
-        let vertices: Vec<PathVertex> = self.vertices();
-        let points: Vec<Point> = vertices.iter().map(|c| resolve(c.vertex())).collect();
-
-        let mut size = Size::zero();
-        if points.is_empty() {
-            return Ok(Fragment::frame(Frame::new(size)));
-        }
-
-        // Only create a path if there are more than zero points.
-        // Construct a closed path given all points.
-        let mut path = Path::new();
-        path.move_to(points[0]);
-
-        let mut add_cubic =
-            |from_point: Point, to_point: Point, from: PathVertex, to: PathVertex| {
-                let from_control_point = resolve(from.control_point_from()) + from_point;
-                let to_control_point = resolve(to.control_point_to()) + to_point;
-                path.cubic_to(from_control_point, to_control_point, to_point);
-
-                let p0 = kurbo::Point::new(from_point.x.to_raw(), from_point.y.to_raw());
-                let p1 = kurbo::Point::new(
-                    from_control_point.x.to_raw(),
-                    from_control_point.y.to_raw(),
-                );
-                let p2 = kurbo::Point::new(
-                    to_control_point.x.to_raw(),
-                    to_control_point.y.to_raw(),
-                );
-                let p3 = kurbo::Point::new(to_point.x.to_raw(), to_point.y.to_raw());
-                let extrema = CubicBez::new(p0, p1, p2, p3).bounding_box();
-                size.x.set_max(Abs::raw(extrema.x1));
-                size.y.set_max(Abs::raw(extrema.y1));
-            };
-
-        for (vertex_window, point_window) in vertices.windows(2).zip(points.windows(2)) {
-            let from = vertex_window[0];
-            let to = vertex_window[1];
-            let from_point = point_window[0];
-            let to_point = point_window[1];
-
-            add_cubic(from_point, to_point, from, to);
-        }
-
-        if self.closed(styles) {
-            let from = *vertices.last().unwrap(); // We checked that we have at least one element.
-            let to = vertices[0];
-            let from_point = *points.last().unwrap();
-            let to_point = points[0];
-
-            add_cubic(from_point, to_point, from, to);
-            path.close_path();
-        }
-
-        // Prepare fill and stroke.
-        let fill = self.fill(styles);
-        let stroke = match self.stroke(styles) {
-            Smart::Auto if fill.is_none() => Some(Stroke::default()),
-            Smart::Auto => None,
-            Smart::Custom(stroke) => stroke.map(PartialStroke::unwrap_or_default),
-        };
-
-        let mut frame = Frame::new(size);
-        let shape = Shape { geometry: Geometry::Path(path), stroke, fill };
-        frame.push(Point::zero(), FrameItem::Shape(shape, self.span()));
-
-        Ok(Fragment::frame(frame))
+impl Show for Packed<PathElem> {
+    fn show(&self, engine: &mut Engine, _: StyleChain) -> SourceResult<Content> {
+        Ok(BlockElem::single_layouter(self.clone(), engine.routines.layout_path)
+            .pack()
+            .spanned(self.span()))
     }
 }
 
+/// A component used for path creation.
 #[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
 pub enum PathVertex {
     Vertex(Axes<Rel<Length>>),

@@ -1,10 +1,14 @@
-use std::f64::consts::SQRT_2;
-
-use crate::prelude::*;
+use crate::diag::SourceResult;
+use crate::engine::Engine;
+use crate::foundations::{
+    elem, Cast, Content, NativeElement, Packed, Show, Smart, StyleChain,
+};
+use crate::layout::{Abs, BlockElem, Corners, Length, Point, Rel, Sides, Size, Sizing};
+use crate::visualize::{Curve, FixedStroke, Paint, Stroke};
 
 /// A rectangle with optional content.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// // Without content.
 /// #rect(width: 35%, height: 30pt)
@@ -15,16 +19,13 @@ use crate::prelude::*;
 ///   to fit the content.
 /// ]
 /// ```
-///
-/// Display: Rectangle
-/// Category: visualize
-#[element(Layout)]
+#[elem(title = "Rectangle", Show)]
 pub struct RectElem {
     /// The rectangle's width, relative to its parent container.
     pub width: Smart<Rel<Length>>,
 
     /// The rectangle's height, relative to its parent container.
-    pub height: Smart<Rel<Length>>,
+    pub height: Sizing,
 
     /// How to fill the rectangle.
     ///
@@ -41,9 +42,8 @@ pub struct RectElem {
     /// - `{none}` to disable stroking
     /// - `{auto}` for a stroke of `{1pt + black}` if and if only if no fill is
     ///   given.
-    /// - Any kind of stroke that can also be used for
-    ///   [lines]($func/line.stroke).
-    /// - A dictionary describing the stroke for each side inidvidually. The
+    /// - Any kind of [stroke]
+    /// - A dictionary describing the stroke for each side individually. The
     ///   dictionary can contain the following keys in order of precedence:
     ///   - `top`: The top stroke.
     ///   - `right`: The right stroke.
@@ -65,7 +65,7 @@ pub struct RectElem {
     /// ```
     #[resolve]
     #[fold]
-    pub stroke: Smart<Sides<Option<Option<PartialStroke>>>>,
+    pub stroke: Smart<Sides<Option<Option<Stroke>>>>,
 
     /// How much to round the rectangle's corners, relative to the minimum of
     /// the width and height divided by two. This can be:
@@ -106,20 +106,14 @@ pub struct RectElem {
     pub radius: Corners<Option<Rel<Length>>>,
 
     /// How much to pad the rectangle's content.
-    ///
-    /// _Note:_ When the rectangle contains text, its exact size depends on the
-    /// current [text edges]($func/text.top-edge).
-    ///
-    /// ```example
-    /// #rect(inset: 0pt)[Tight]
-    /// ```
+    /// See the [box's documentation]($box.outset) for more details.
     #[resolve]
     #[fold]
-    #[default(Sides::splat(Abs::pt(5.0).into()))]
+    #[default(Sides::splat(Some(Abs::pt(5.0).into())))]
     pub inset: Sides<Option<Rel<Length>>>,
 
     /// How much to expand the rectangle's size without affecting the layout.
-    /// See the [box's documentation]($func/box.outset) for more details.
+    /// See the [box's documentation]($box.outset) for more details.
     #[resolve]
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
@@ -129,37 +123,23 @@ pub struct RectElem {
     /// When this is omitted, the rectangle takes on a default size of at most
     /// `{45pt}` by `{30pt}`.
     #[positional]
+    #[borrowed]
     pub body: Option<Content>,
 }
 
-impl Layout for RectElem {
-    #[tracing::instrument(name = "RectElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        layout(
-            vt,
-            styles,
-            regions,
-            ShapeKind::Rect,
-            &self.body(styles),
-            Axes::new(self.width(styles), self.height(styles)),
-            self.fill(styles),
-            self.stroke(styles),
-            self.inset(styles),
-            self.outset(styles),
-            self.radius(styles),
-            self.span(),
-        )
+impl Show for Packed<RectElem> {
+    fn show(&self, engine: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
+        Ok(BlockElem::single_layouter(self.clone(), engine.routines.layout_rect)
+            .with_width(self.width(styles))
+            .with_height(self.height(styles))
+            .pack()
+            .spanned(self.span()))
     }
 }
 
 /// A square with optional content.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// // Without content.
 /// #square(size: 40pt)
@@ -170,10 +150,7 @@ impl Layout for RectElem {
 ///   sized to fit.
 /// ]
 /// ```
-///
-/// Display: Square
-/// Category: visualize
-#[element(Layout)]
+#[elem(Show)]
 pub struct SquareElem {
     /// The square's side length. This is mutually exclusive with `width` and
     /// `height`.
@@ -199,35 +176,35 @@ pub struct SquareElem {
     /// height.
     #[parse(match size {
         None => args.named("height")?,
-        size => size,
+        size => size.map(Into::into),
     })]
-    pub height: Smart<Rel<Length>>,
+    pub height: Sizing,
 
-    /// How to fill the square. See the
-    /// [rectangle's documentation]($func/rect.fill) for more details.
+    /// How to fill the square. See the [rectangle's documentation]($rect.fill)
+    /// for more details.
     pub fill: Option<Paint>,
 
-    /// How to stroke the square. See the [rectangle's
-    /// documentation]($func/rect.stroke) for more details.
+    /// How to stroke the square. See the
+    /// [rectangle's documentation]($rect.stroke) for more details.
     #[resolve]
     #[fold]
-    pub stroke: Smart<Sides<Option<Option<PartialStroke>>>>,
+    pub stroke: Smart<Sides<Option<Option<Stroke>>>>,
 
-    /// How much to round the square's corners. See the [rectangle's
-    /// documentation]($func/rect.radius) for more details.
+    /// How much to round the square's corners. See the
+    /// [rectangle's documentation]($rect.radius) for more details.
     #[resolve]
     #[fold]
     pub radius: Corners<Option<Rel<Length>>>,
 
-    /// How much to pad the square's content. See the [rectangle's
-    /// documentation]($func/rect.inset) for more details.
+    /// How much to pad the square's content. See the
+    /// [box's documentation]($box.inset) for more details.
     #[resolve]
     #[fold]
-    #[default(Sides::splat(Abs::pt(5.0).into()))]
+    #[default(Sides::splat(Some(Abs::pt(5.0).into())))]
     pub inset: Sides<Option<Rel<Length>>>,
 
     /// How much to expand the square's size without affecting the layout. See
-    /// the [rectangle's documentation]($func/rect.outset) for more details.
+    /// the [box's documentation]($box.outset) for more details.
     #[resolve]
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
@@ -238,37 +215,23 @@ pub struct SquareElem {
     /// When this is omitted, the square takes on a default size of at most
     /// `{30pt}`.
     #[positional]
+    #[borrowed]
     pub body: Option<Content>,
 }
 
-impl Layout for SquareElem {
-    #[tracing::instrument(name = "SquareElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        layout(
-            vt,
-            styles,
-            regions,
-            ShapeKind::Square,
-            &self.body(styles),
-            Axes::new(self.width(styles), self.height(styles)),
-            self.fill(styles),
-            self.stroke(styles),
-            self.inset(styles),
-            self.outset(styles),
-            self.radius(styles),
-            self.span(),
-        )
+impl Show for Packed<SquareElem> {
+    fn show(&self, engine: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
+        Ok(BlockElem::single_layouter(self.clone(), engine.routines.layout_square)
+            .with_width(self.width(styles))
+            .with_height(self.height(styles))
+            .pack()
+            .spanned(self.span()))
     }
 }
 
 /// An ellipse with optional content.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// // Without content.
 /// #ellipse(width: 35%, height: 30pt)
@@ -280,36 +243,33 @@ impl Layout for SquareElem {
 ///   to fit the content.
 /// ]
 /// ```
-///
-/// Display: Ellipse
-/// Category: visualize
-#[element(Layout)]
+#[elem(Show)]
 pub struct EllipseElem {
     /// The ellipse's width, relative to its parent container.
     pub width: Smart<Rel<Length>>,
 
     /// The ellipse's height, relative to its parent container.
-    pub height: Smart<Rel<Length>>,
+    pub height: Sizing,
 
-    /// How to fill the ellipse. See the
-    /// [rectangle's documentation]($func/rect.fill) for more details.
+    /// How to fill the ellipse. See the [rectangle's documentation]($rect.fill)
+    /// for more details.
     pub fill: Option<Paint>,
 
-    /// How to stroke the ellipse. See the [rectangle's
-    /// documentation]($func/rect.stroke) for more details.
+    /// How to stroke the ellipse. See the
+    /// [rectangle's documentation]($rect.stroke) for more details.
     #[resolve]
     #[fold]
-    pub stroke: Smart<Option<PartialStroke>>,
+    pub stroke: Smart<Option<Stroke>>,
 
-    /// How much to pad the ellipse's content. See the [rectangle's
-    /// documentation]($func/rect.inset) for more details.
+    /// How much to pad the ellipse's content. See the
+    /// [box's documentation]($box.inset) for more details.
     #[resolve]
     #[fold]
-    #[default(Sides::splat(Abs::pt(5.0).into()))]
+    #[default(Sides::splat(Some(Abs::pt(5.0).into())))]
     pub inset: Sides<Option<Rel<Length>>>,
 
     /// How much to expand the ellipse's size without affecting the layout. See
-    /// the [rectangle's documentation]($func/rect.outset) for more details.
+    /// the [box's documentation]($box.outset) for more details.
     #[resolve]
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
@@ -319,37 +279,23 @@ pub struct EllipseElem {
     /// When this is omitted, the ellipse takes on a default size of at most
     /// `{45pt}` by `{30pt}`.
     #[positional]
+    #[borrowed]
     pub body: Option<Content>,
 }
 
-impl Layout for EllipseElem {
-    #[tracing::instrument(name = "EllipseElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        layout(
-            vt,
-            styles,
-            regions,
-            ShapeKind::Ellipse,
-            &self.body(styles),
-            Axes::new(self.width(styles), self.height(styles)),
-            self.fill(styles),
-            self.stroke(styles).map(Sides::splat),
-            self.inset(styles),
-            self.outset(styles),
-            Corners::splat(Rel::zero()),
-            self.span(),
-        )
+impl Show for Packed<EllipseElem> {
+    fn show(&self, engine: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
+        Ok(BlockElem::single_layouter(self.clone(), engine.routines.layout_ellipse)
+            .with_width(self.width(styles))
+            .with_height(self.height(styles))
+            .pack()
+            .spanned(self.span()))
     }
 }
 
 /// A circle with optional content.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// // Without content.
 /// #circle(radius: 25pt)
@@ -361,10 +307,7 @@ impl Layout for EllipseElem {
 ///   sized to fit.
 /// ]
 /// ```
-///
-/// Display: Circle
-/// Category: visualize
-#[element(Layout)]
+#[elem(Show)]
 pub struct CircleElem {
     /// The circle's radius. This is mutually exclusive with `width` and
     /// `height`.
@@ -387,37 +330,37 @@ pub struct CircleElem {
     )]
     pub width: Smart<Rel<Length>>,
 
-    /// The circle's height.This is mutually exclusive with `radius` and
+    /// The circle's height. This is mutually exclusive with `radius` and
     /// `width`.
     ///
     /// In contrast to `radius`, this can be relative to the parent container's
     /// height.
     #[parse(match size {
         None => args.named("height")?,
-        size => size,
+        size => size.map(Into::into),
     })]
-    pub height: Smart<Rel<Length>>,
+    pub height: Sizing,
 
-    /// How to fill the circle. See the
-    /// [rectangle's documentation]($func/rect.fill) for more details.
+    /// How to fill the circle. See the [rectangle's documentation]($rect.fill)
+    /// for more details.
     pub fill: Option<Paint>,
 
-    /// How to stroke the circle. See the [rectangle's
-    /// documentation]($func/rect.stroke) for more details.
+    /// How to stroke the circle. See the
+    /// [rectangle's documentation]($rect.stroke) for more details.
     #[resolve]
     #[fold]
     #[default(Smart::Auto)]
-    pub stroke: Smart<Option<PartialStroke>>,
+    pub stroke: Smart<Option<Stroke>>,
 
-    /// How much to pad the circle's content. See the [rectangle's
-    /// documentation]($func/rect.inset) for more details.
+    /// How much to pad the circle's content. See the
+    /// [box's documentation]($box.inset) for more details.
     #[resolve]
     #[fold]
-    #[default(Sides::splat(Abs::pt(5.0).into()))]
+    #[default(Sides::splat(Some(Abs::pt(5.0).into())))]
     pub inset: Sides<Option<Rel<Length>>>,
 
     /// How much to expand the circle's size without affecting the layout. See
-    /// the [rectangle's documentation]($func/rect.outset) for more details.
+    /// the [box's documentation]($box.outset) for more details.
     #[resolve]
     #[fold]
     pub outset: Sides<Option<Rel<Length>>>,
@@ -425,145 +368,81 @@ pub struct CircleElem {
     /// The content to place into the circle. The circle expands to fit this
     /// content, keeping the 1-1 aspect ratio.
     #[positional]
+    #[borrowed]
     pub body: Option<Content>,
 }
 
-impl Layout for CircleElem {
-    #[tracing::instrument(name = "CircleElem::layout", skip_all)]
-    fn layout(
-        &self,
-        vt: &mut Vt,
-        styles: StyleChain,
-        regions: Regions,
-    ) -> SourceResult<Fragment> {
-        layout(
-            vt,
-            styles,
-            regions,
-            ShapeKind::Circle,
-            &self.body(styles),
-            Axes::new(self.width(styles), self.height(styles)),
-            self.fill(styles),
-            self.stroke(styles).map(Sides::splat),
-            self.inset(styles),
-            self.outset(styles),
-            Corners::splat(Rel::zero()),
-            self.span(),
-        )
+impl Show for Packed<CircleElem> {
+    fn show(&self, engine: &mut Engine, styles: StyleChain) -> SourceResult<Content> {
+        Ok(BlockElem::single_layouter(self.clone(), engine.routines.layout_circle)
+            .with_width(self.width(styles))
+            .with_height(self.height(styles))
+            .pack()
+            .spanned(self.span()))
     }
 }
 
-/// Layout a shape.
-#[tracing::instrument(name = "shape::layout", skip_all)]
-#[allow(clippy::too_many_arguments)]
-fn layout(
-    vt: &mut Vt,
-    styles: StyleChain,
-    regions: Regions,
-    kind: ShapeKind,
-    body: &Option<Content>,
-    sizing: Axes<Smart<Rel<Length>>>,
-    fill: Option<Paint>,
-    stroke: Smart<Sides<Option<PartialStroke<Abs>>>>,
-    mut inset: Sides<Rel<Abs>>,
-    outset: Sides<Rel<Abs>>,
-    radius: Corners<Rel<Abs>>,
-    span: Span,
-) -> SourceResult<Fragment> {
-    let resolved = sizing
-        .zip(regions.base())
-        .map(|(s, r)| s.map(|v| v.resolve(styles).relative_to(r)));
-
-    let mut frame;
-    if let Some(child) = body {
-        let region = resolved.unwrap_or(regions.base());
-        if kind.is_round() {
-            inset = inset.map(|side| side + Ratio::new(0.5 - SQRT_2 / 4.0));
-        }
-
-        // Pad the child.
-        let child = child.clone().padded(inset.map(|side| side.map(Length::from)));
-        let expand = sizing.as_ref().map(Smart::is_custom);
-        let pod = Regions::one(region, expand);
-        frame = child.layout(vt, styles, pod)?.into_frame();
-
-        // Enforce correct size.
-        *frame.size_mut() = expand.select(region, frame.size());
-
-        // Relayout with full expansion into square region to make sure
-        // the result is really a square or circle.
-        if kind.is_quadratic() {
-            frame.set_size(Size::splat(frame.size().max_by_side()));
-            let length = frame.size().max_by_side().min(region.min_by_side());
-            let pod = Regions::one(Size::splat(length), Axes::splat(true));
-            frame = child.layout(vt, styles, pod)?.into_frame();
-        }
-
-        // Enforce correct size again.
-        *frame.size_mut() = expand.select(region, frame.size());
-        if kind.is_quadratic() {
-            frame.set_size(Size::splat(frame.size().max_by_side()));
-        }
-    } else {
-        // The default size that a shape takes on if it has no child and
-        // enough space.
-        let default = Size::new(Abs::pt(45.0), Abs::pt(30.0));
-        let mut size = resolved.unwrap_or(default.min(regions.base()));
-        if kind.is_quadratic() {
-            size = Size::splat(size.min_by_side());
-        }
-        frame = Frame::new(size);
-    }
-
-    // Prepare stroke.
-    let stroke = match stroke {
-        Smart::Auto if fill.is_none() => Sides::splat(Some(Stroke::default())),
-        Smart::Auto => Sides::splat(None),
-        Smart::Custom(strokes) => {
-            strokes.map(|s| s.map(PartialStroke::unwrap_or_default))
-        }
-    };
-
-    // Add fill and/or stroke.
-    if fill.is_some() || stroke.iter().any(Option::is_some) {
-        if kind.is_round() {
-            let outset = outset.relative_to(frame.size());
-            let size = frame.size() + outset.sum_by_axis();
-            let pos = Point::new(-outset.left, -outset.top);
-            let shape = ellipse(size, fill, stroke.left);
-            frame.prepend(pos, FrameItem::Shape(shape, span));
-        } else {
-            frame.fill_and_stroke(fill, stroke, outset, radius, span);
-        }
-    }
-
-    // Apply metadata.
-    frame.meta(styles, false);
-
-    Ok(Fragment::frame(frame))
+/// A geometric shape with optional fill and stroke.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub struct Shape {
+    /// The shape's geometry.
+    pub geometry: Geometry,
+    /// The shape's background fill.
+    pub fill: Option<Paint>,
+    /// The shape's fill rule.
+    pub fill_rule: FillRule,
+    /// The shape's border stroke.
+    pub stroke: Option<FixedStroke>,
 }
 
-/// A category of shape.
-#[derive(Debug, Copy, Clone, Eq, PartialEq, Hash)]
-pub enum ShapeKind {
-    /// A rectangle with equal side lengths.
-    Square,
-    /// A quadrilateral with four right angles.
-    Rect,
-    /// An ellipse with coinciding foci.
-    Circle,
-    /// A curve around two focal points.
-    Ellipse,
+/// A fill rule for curve drawing.
+#[derive(Debug, Default, Copy, Clone, Eq, PartialEq, Hash, Cast)]
+pub enum FillRule {
+    /// Specifies that "inside" is computed by a non-zero sum of signed edge crossings.
+    #[default]
+    NonZero,
+    /// Specifies that "inside" is computed by an odd number of edge crossings.
+    EvenOdd,
 }
 
-impl ShapeKind {
-    /// Whether this shape kind is curvy.
-    fn is_round(self) -> bool {
-        matches!(self, Self::Circle | Self::Ellipse)
+/// A shape's geometry.
+#[derive(Debug, Clone, Eq, PartialEq, Hash)]
+pub enum Geometry {
+    /// A line to a point (relative to its position).
+    Line(Point),
+    /// A rectangle with its origin in the topleft corner.
+    Rect(Size),
+    /// A curve consisting of movements, lines, and Bézier segments.
+    Curve(Curve),
+}
+
+impl Geometry {
+    /// Fill the geometry without a stroke.
+    pub fn filled(self, fill: impl Into<Paint>) -> Shape {
+        Shape {
+            geometry: self,
+            fill: Some(fill.into()),
+            fill_rule: FillRule::default(),
+            stroke: None,
+        }
     }
 
-    /// Whether this shape kind has equal side length.
-    fn is_quadratic(self) -> bool {
-        matches!(self, Self::Square | Self::Circle)
+    /// Stroke the geometry without a fill.
+    pub fn stroked(self, stroke: FixedStroke) -> Shape {
+        Shape {
+            geometry: self,
+            fill: None,
+            fill_rule: FillRule::default(),
+            stroke: Some(stroke),
+        }
+    }
+
+    /// The bounding box of the geometry.
+    pub fn bbox_size(&self) -> Size {
+        match self {
+            Self::Line(line) => Size::new(line.x, line.y),
+            Self::Rect(rect) => *rect,
+            Self::Curve(curve) => curve.bbox_size(),
+        }
     }
 }

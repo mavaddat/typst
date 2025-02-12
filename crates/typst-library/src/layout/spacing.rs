@@ -1,6 +1,7 @@
-use std::cmp::Ordering;
+use typst_utils::Numeric;
 
-use crate::prelude::*;
+use crate::foundations::{cast, elem, Content};
+use crate::layout::{Abs, Em, Fr, Length, Ratio, Rel};
 
 /// Inserts horizontal spacing into a paragraph.
 ///
@@ -8,20 +9,28 @@ use crate::prelude::*;
 /// remaining space on the line is distributed among all fractional spacings
 /// according to their relative fractions.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// First #h(1cm) Second \
-/// First #h(30%) Second \
+/// First #h(30%) Second
+/// ```
+///
+/// # Fractional spacing
+/// With fractional spacing, you can align things within a line without forcing
+/// a paragraph break (like [`align`] would). Each fractionally sized element
+/// gets space based on the ratio of its fraction to the sum of all fractions.
+///
+/// ```example
+/// First #h(1fr) Second \
+/// First #h(1fr) Second #h(1fr) Third \
 /// First #h(2fr) Second #h(1fr) Third
 /// ```
 ///
-/// ## Mathematical Spacing { #math-spacing }
+/// # Mathematical Spacing { #math-spacing }
 /// In [mathematical formulas]($category/math), you can additionally use these
-/// constants to add spacing between elements: `thin`, `med`, `thick`, `quad`.
-///
-/// Display: Spacing (H)
-/// Category: layout
-#[element(Behave)]
+/// constants to add spacing between elements: `thin` (1/6 em), `med` (2/9 em),
+/// `thick` (5/18 em), `quad` (1 em), `wide` (2 em).
+#[elem(title = "Spacing (H)")]
 pub struct HElem {
     /// How much spacing to insert.
     #[required]
@@ -36,7 +45,7 @@ pub struct HElem {
     /// next to weak spacing, you can explicitly write `[#" "]` (for a normal
     /// space) or `[~]` (for a non-breaking space). The latter can be useful to
     /// create a construct that always attaches to the preceding word with one
-    /// non-breaking space, independently of wether a markup space existed in
+    /// non-breaking space, independently of whether a markup space existed in
     /// front or not.
     ///
     /// ```example
@@ -56,20 +65,10 @@ pub struct HElem {
     pub weak: bool,
 }
 
-impl Behave for HElem {
-    fn behaviour(&self) -> Behaviour {
-        if self.amount().is_fractional() {
-            Behaviour::Destructive
-        } else if self.weak(StyleChain::default()) {
-            Behaviour::Weak(1)
-        } else {
-            Behaviour::Ignorant
-        }
-    }
-
-    fn larger(&self, prev: &Content) -> bool {
-        let Some(prev) = prev.to::<Self>() else { return false };
-        self.amount() > prev.amount()
+impl HElem {
+    /// Zero-width horizontal weak spacing that eats surrounding spaces.
+    pub fn hole() -> Self {
+        Self::new(Abs::zero().into()).with_weak(true)
     }
 }
 
@@ -79,7 +78,7 @@ impl Behave for HElem {
 /// the remaining space on the page is distributed among all fractional spacings
 /// according to their relative fractions.
 ///
-/// ## Example { #example }
+/// # Example
 /// ```example
 /// #grid(
 ///   rows: 3cm,
@@ -93,10 +92,7 @@ impl Behave for HElem {
 ///   [A #v(1fr) B],
 /// )
 /// ```
-///
-/// Display: Spacing (V)
-/// Category: layout
-#[element(Behave)]
+#[elem(title = "Spacing (V)")]
 pub struct VElem {
     /// How much spacing to insert.
     #[required]
@@ -115,62 +111,18 @@ pub struct VElem {
     /// #v(4pt, weak: true)
     /// The proof is simple:
     /// ```
-    #[external]
     pub weak: bool,
 
-    /// The element's weakness level, see also [`Behaviour`].
+    /// Whether the spacing collapses if not immediately preceded by a
+    /// paragraph.
     #[internal]
-    #[parse(args.named("weak")?.map(|v: bool| v as usize))]
-    pub weakness: usize,
-}
-
-impl VElem {
-    /// Normal strong spacing.
-    pub fn strong(amount: Spacing) -> Self {
-        Self::new(amount).with_weakness(0)
-    }
-
-    /// User-created weak spacing.
-    pub fn weak(amount: Spacing) -> Self {
-        Self::new(amount).with_weakness(1)
-    }
-
-    /// Weak spacing with list attach weakness.
-    pub fn list_attach(amount: Spacing) -> Self {
-        Self::new(amount).with_weakness(2)
-    }
-
-    /// Weak spacing with BlockElem::ABOVE/BELOW weakness.
-    pub fn block_around(amount: Spacing) -> Self {
-        Self::new(amount).with_weakness(3)
-    }
-
-    /// Weak spacing with BlockElem::SPACING weakness.
-    pub fn block_spacing(amount: Spacing) -> Self {
-        Self::new(amount).with_weakness(4)
-    }
-}
-
-impl Behave for VElem {
-    fn behaviour(&self) -> Behaviour {
-        if self.amount().is_fractional() {
-            Behaviour::Destructive
-        } else if self.weakness(StyleChain::default()) > 0 {
-            Behaviour::Weak(self.weakness(StyleChain::default()))
-        } else {
-            Behaviour::Ignorant
-        }
-    }
-
-    fn larger(&self, prev: &Content) -> bool {
-        let Some(prev) = prev.to::<Self>() else { return false };
-        self.amount() > prev.amount()
-    }
+    #[parse(Some(false))]
+    pub attach: bool,
 }
 
 cast! {
     VElem,
-    v: Content => v.to::<Self>().cloned().ok_or("expected `v` element")?,
+    v: Content => v.unpack::<Self>().map_err(|_| "expected `v` element")?,
 }
 
 /// Kinds of spacing.
@@ -219,16 +171,6 @@ impl From<Length> for Spacing {
 impl From<Fr> for Spacing {
     fn from(fr: Fr) -> Self {
         Self::Fr(fr)
-    }
-}
-
-impl PartialOrd for Spacing {
-    fn partial_cmp(&self, other: &Self) -> Option<Ordering> {
-        match (self, other) {
-            (Self::Rel(a), Self::Rel(b)) => a.partial_cmp(b),
-            (Self::Fr(a), Self::Fr(b)) => a.partial_cmp(b),
-            _ => None,
-        }
     }
 }
 

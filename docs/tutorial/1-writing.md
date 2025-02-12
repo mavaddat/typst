@@ -20,7 +20,7 @@ In this report, we will explore the
 various factors that influence fluid
 dynamics in glaciers and how they
 contribute to the formation and
-behavior of these natural structures.
+behaviour of these natural structures.
 ```
 
 _Throughout this tutorial, we'll show code examples like this one. Just like in the app, the first panel contains markup and the second panel shows a preview. We shrunk the page to fit the examples so you can see what's going on._
@@ -36,7 +36,7 @@ In this report, we will explore the
 various factors that influence _fluid
 dynamics_ in glaciers and how they
 contribute to the formation and
-behavior of these natural structures.
+behaviour of these natural structures.
 ```
 
 That was easy! To add a new paragraph, just add a blank line in between two
@@ -85,7 +85,7 @@ and emphasized text, respectively. However, having a special symbol for
 everything we want to insert into our document would soon become cryptic and
 unwieldy. For this reason, Typst reserves markup symbols only for the most
 common things. Everything else is inserted with _functions._ For our image to
-show up on the page, we use Typst's [`image`]($func/image) function.
+show up on the page, we use Typst's [`image`] function.
 
 ```example
 #image("glacier.jpg")
@@ -98,8 +98,8 @@ result (the function's _return value_) into the document. In our case, the
 function in markup, we first need to type the `#` character, immediately
 followed by the name of the function. Then, we enclose the arguments in
 parentheses. Typst recognizes many different data types within argument lists.
-Our file path is a short [string of text]($type/string), so we need to enclose
-it in double quotes.
+Our file path is a short [string of text]($str), so we need to enclose it in
+double quotes.
 
 The inserted image uses the whole width of the page. To change that, pass the
 `width` argument to the `image` function. This is a _named_ argument and
@@ -110,18 +110,20 @@ they are separated by commas, so we first need to put a comma behind the path.
 #image("glacier.jpg", width: 70%)
 ```
 
-The `width` argument is a [relative length]($type/relative-length). In our case,
-we specified a percentage, determining that the image shall take up `{70%}` of
-the page's width. We also could have specified an absolute value like `{1cm}` or
+The `width` argument is a [relative length]($relative). In our case, we
+specified a percentage, determining that the image shall take up `{70%}` of the
+page's width. We also could have specified an absolute value like `{1cm}` or
 `{0.7in}`.
 
 Just like text, the image is now aligned at the left side of the page by
-default. It's also lacking a caption. Let's fix that by using the
-[figure]($func/figure) function. This function takes the figure's contents as a
-positional argument and an optional caption as a named argument.
+default. It's also lacking a caption. Let's fix that by using the [figure]
+function. This function takes the figure's contents as a positional argument and
+an optional caption as a named argument.
 
-Within the argument list of the `figure` function, Typst is already in code mode. This means, you can now remove the hashtag before the image function call.
-The hashtag is only needed directly in markup (to disambiguate text from function calls).
+Within the argument list of the `figure` function, Typst is already in code
+mode. This means, you now have to remove the hash before the image function call.
+The hash is only needed directly in markup (to disambiguate text from function
+calls).
 
 The caption consists of arbitrary markup. To give markup to a function, we
 enclose it in square brackets. This construct is called a _content block._
@@ -176,9 +178,8 @@ valid kind of content.
 
 ## Adding a bibliography { #bibliography }
 As you write up your report, you need to back up some of your claims. You can
-add a bibliography to your document with the
-[`bibliography`]($func/bibliography) function. This function expects a path
-to a bibliography file.
+add a bibliography to your document with the [`bibliography`] function. This
+function expects a path to a bibliography file.
 
 Typst's native bibliography format is
 [Hayagriva](https://github.com/typst/hayagriva/blob/main/docs/file-format.md),
@@ -190,7 +191,7 @@ Once the document contains a bibliography, you can start citing from it.
 Citations use the same syntax as references to a label. As soon as you cite a
 source for the first time, it will appear in the bibliography section of your
 document. Typst supports different citation and bibliography styles. Consult the
-[reference]($func/bibliography.style) for more details.
+[reference]($bibliography.style) for more details.
 
 ```example
 = Methods
@@ -200,7 +201,7 @@ established in @glacier-melt.
 #bibliography("works.bib")
 ```
 
-## Maths { #maths }
+## Maths
 After fleshing out the methods section, you move on to the meat of the document:
 Your equations. Typst has built-in mathematical typesetting and uses its own
 math notation. Let's start with a simple equation. We wrap it in `[$]` signs
@@ -269,17 +270,17 @@ $ 7.32 beta +
 
 Not all math constructs have special syntax. Instead, we use functions, just
 like the `image` function we have seen before. For example, to insert a column
-vector, we can use the [`vec`]($func/math.vec) function. Within math mode,
-function calls don't need to start with the `#` character.
+vector, we can use the [`vec`]($math.vec) function. Within math mode, function
+calls don't need to start with the `#` character.
 
 ```example
 $ v := vec(x_1, x_2, x_3) $
 ```
 
 Some functions are only available within math mode. For example, the
-[`cal`]($func/math.cal) function is used to typeset calligraphic letters
-commonly used for sets. The [math section of the reference]($category/math)
-provides a complete list of all functions that math mode makes available.
+[`cal`]($math.cal) function is used to typeset calligraphic letters commonly
+used for sets. The [math section of the reference]($category/math) provides a
+complete list of all functions that math mode makes available.
 
 One more thing: Many symbols, such as the arrow, have a lot of variants. You can
 select among these variants by appending a dot and a modifier name to a symbol's
@@ -293,14 +294,13 @@ This notation is also available in markup mode, but the symbol name must be
 preceded with `#sym.` there. See the [symbols section]($category/symbols/sym)
 for a list of all available symbols.
 
-## Review { #review }
+## Review
 You have now seen how to write a basic document in Typst. You learned how to
 emphasize text, write lists, insert images, align content, and typeset
 mathematical expressions. You also learned about Typst's functions. There are
 many more kinds of content that Typst lets you insert into your document, such
-as [tables]($func/table), [shapes]($category/visualize), and
-[code blocks]($func/raw). You can peruse the [reference]($reference) to learn
-more about these and other features.
+as [tables]($table), [shapes]($category/visualize), and [code blocks]($raw). You
+can peruse the [reference] to learn more about these and other features.
 
 For the moment, you have completed writing your report. You have already saved a
 PDF by clicking on the download button in the top right corner. However, you
